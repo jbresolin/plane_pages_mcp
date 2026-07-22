@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat .gitignore && echo \"---\" && ls -la ~/dev/ 2>/dev/null | head -30 && echo \"---PLANE---\" && find / -maxdepth 6 -type d -name \"plane*\" 2>/dev/null | grep -iE \"plane\" | head -20)",
+      "Read(//home/joaob/dev/**)",
+      "Read(//home/joaob/plane-dev/**)",
+      "Bash(cat ~/plane-dev/docker-compose.yaml)",
+      "Bash(cat ~/plane-dev/.env 2>/dev/null; echo \"---DOCKER PS---\"; docker ps --format '{{.Names}}\\\\t{{.Image}}\\\\t{{.Ports}}' 2>/dev/null | head -40)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3300/live/convert-document/ -X POST -H 'Content-Type: application/json' -d '{\"description_html\":\"<p>ping</p>\",\"variant\":\"rich\"}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3300/convert-document/ -X POST -H 'Content-Type: application/json' -d '{\"description_html\":\"<p>ping</p>\",\"variant\":\"rich\"}')",
+      "Bash(curl -s http://localhost:3300/live/convert-document/ -X POST -H 'Content-Type: application/json' -d '{\"description_html\":\"<h1>hi</h1><p>ping</p>\",\"variant\":\"rich\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('keys:', list\\(d.keys\\(\\)\\)\\); print\\('json:', json.dumps\\(d.get\\('description_json'\\)\\)[:200]\\); import base64; b=d.get\\('description_binary'\\); print\\('binary len bytes:', len\\(base64.b64decode\\(b\\)\\)\\)\")",
+      "Bash(select:TodoWrite)",
+      "Bash(sudo -n true)",
+      "Bash(pip3 --version)",
+      "Bash(curl -LsSf https://astral.sh/uv/install.sh)",
+      "Bash(sh)",
+      "Read(//home/joaob/.local/bin/**)",
+      "Bash(.venv/bin/python -)"
+    ]
+  }
+}

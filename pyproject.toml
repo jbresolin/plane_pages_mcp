@@ -1,0 +1,32 @@
+[project]
+name = "plane_pages_mcp"
+version = "0.1.0"
+description = "MCP server exposing read/write access to Plane CE Pages (absent from CE's public REST API)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.0",
+    "psycopg[binary,pool]>=3.2",
+    "httpx>=0.27",
+    "markdown>=3.6",
+    "markdownify>=0.13",
+    "beautifulsoup4>=4.12",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+plane-pages-mcp = "plane_pages_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plane_pages_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
