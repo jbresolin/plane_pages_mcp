@@ -137,6 +137,7 @@ CREATE ROLE plane_pages LOGIN PASSWORD '…';
 GRANT SELECT ON pages, project_pages, projects, workspaces TO plane_pages;
 GRANT INSERT, UPDATE ON pages, project_pages TO plane_pages;
 -- no DELETE, no other tables
+GRANT SELECT ON users TO plane_pages;
 ```
 
 The `users` table is read by `verify` (to confirm `SERVICE_USER_ID`); grant
