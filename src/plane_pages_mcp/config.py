@@ -1,7 +1,13 @@
 """Runtime configuration, loaded from environment variables.
 
 See README §Configuration for the full table. Nothing here reads page content;
-secrets (DATABASE_URL, MCP_AUTH_TOKEN) are never logged.
+secrets (DATABASE_URL, PLANE_API_KEY, MCP_AUTH_TOKEN) are never logged.
+
+Two independent subsystems, each with its own capability flag:
+  * pages  (DB + live converter) — needs DATABASE_URL (+ SERVICE_USER_ID to write).
+  * rest   (public REST API)      — needs PLANE_BASE_URL + PLANE_API_KEY.
+The server starts if at least one is configured; a missing PAT never breaks
+pages and a missing DB never breaks work items.
 """
 
 from __future__ import annotations
@@ -23,17 +29,30 @@ def _require(name: str) -> str:
 
 @dataclass(frozen=True)
 class Config:
-    database_url: str
+    # pages subsystem (all optional at the config layer; gated by pages_enabled)
+    database_url: str | None
     live_convert_url: str
-    workspace_slug: str
-    service_user_id: str
+    service_user_id: str | None
     web_url: str
+    # rest subsystem
+    plane_base_url: str | None
+    plane_api_key: str | None
+    # shared
+    workspace_slug: str | None  # now a DEFAULT, not a fixture
     mcp_auth_token: str | None
     transport: str  # "http" | "stdio"
     host: str
     port: int
     mcp_path: str
     log_level: str
+
+    @property
+    def pages_enabled(self) -> bool:
+        return bool(self.database_url)
+
+    @property
+    def rest_enabled(self) -> bool:
+        return bool(self.plane_base_url and self.plane_api_key)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -50,15 +69,23 @@ class Config:
                 "(all requests must present a matching Bearer token)"
             )
 
-        return cls(
-            database_url=_require("DATABASE_URL"),
+        database_url = os.environ.get("DATABASE_URL") or None
+        service_user_id = os.environ.get("SERVICE_USER_ID") or None
+        plane_base_url = os.environ.get("PLANE_BASE_URL")
+        plane_base_url = plane_base_url.rstrip("/") if plane_base_url else None
+        plane_api_key = os.environ.get("PLANE_API_KEY") or None
+
+        cfg = cls(
+            database_url=database_url,
             live_convert_url=os.environ.get(
                 "LIVE_CONVERT_URL",
                 "http://live:3000/live/convert-document/",
             ),
-            workspace_slug=_require("WORKSPACE_SLUG"),
-            service_user_id=_require("SERVICE_USER_ID"),
+            service_user_id=service_user_id,
             web_url=os.environ.get("PLANE_WEB_URL", "http://localhost").rstrip("/"),
+            plane_base_url=plane_base_url,
+            plane_api_key=plane_api_key,
+            workspace_slug=os.environ.get("WORKSPACE_SLUG") or None,
             mcp_auth_token=auth_token,
             transport=transport,
             host=os.environ.get("MCP_HOST", "0.0.0.0"),
@@ -66,3 +93,15 @@ class Config:
             mcp_path=os.environ.get("MCP_PATH", "/mcp"),
             log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper(),
         )
+
+        if not cfg.pages_enabled and not cfg.rest_enabled:
+            raise ConfigError(
+                "nothing to serve: set DATABASE_URL (pages) and/or "
+                "PLANE_BASE_URL + PLANE_API_KEY (work items)"
+            )
+        if cfg.pages_enabled and not cfg.service_user_id:
+            raise ConfigError(
+                "SERVICE_USER_ID is required when DATABASE_URL is set "
+                "(it owns tool-created pages)"
+            )
+        return cfg

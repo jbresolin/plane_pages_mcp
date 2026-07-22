@@ -33,6 +33,7 @@ def create_page(
     db: Database,
     live: LiveConverter,
     *,
+    workspace_id: str,
     title: str,
     content: str,
     project: str,
@@ -43,7 +44,7 @@ def create_page(
     if access not in _ACCESS:
         raise WriteError(f"access must be 'public' or 'private', got {access!r}")
     try:
-        proj = db.resolve_project(project)
+        proj = db.resolve_project(workspace_id, project)
     except NotFoundError as exc:
         raise WriteError(str(exc)) from exc
 
@@ -52,6 +53,7 @@ def create_page(
     with db.transaction() as conn:
         page_id = db.insert_page(
             conn,
+            workspace_id=workspace_id,
             name=title,
             html=html,
             json_doc=json_doc,
@@ -61,7 +63,11 @@ def create_page(
             service_user_id=service_user_id,
         )
         db.insert_project_page(
-            conn, page_id=page_id, project_id=proj["id"], service_user_id=service_user_id
+            conn,
+            workspace_id=workspace_id,
+            page_id=page_id,
+            project_id=proj["id"],
+            service_user_id=service_user_id,
         )
 
     return {
@@ -91,7 +97,7 @@ def update_page(
     with db.transaction() as conn:
         current_html = db.get_page_html(conn, page_id)
         if current_html is None:
-            raise WriteError(f"page {page_id} not found (or deleted) in workspace")
+            raise WriteError(f"page {page_id} not found (or deleted)")
 
         new_fragment = convert.to_html(content, fmt)
         combined_html = current_html + new_fragment if mode == "append" else new_fragment

@@ -1,8 +1,9 @@
 """Postgres access layer for Plane Pages.
 
-Reads go straight to Postgres; every read is scoped to the configured workspace
-and filters ``deleted_at IS NULL`` (Plane soft-deletes). Writes are performed by
-``pipeline.py`` using the low-level helpers here inside a single transaction.
+Reads go straight to Postgres; every read is scoped to a workspace (passed per
+call — the instance is multi-workspace) and filters ``deleted_at IS NULL``
+(Plane soft-deletes). Writes are performed by ``pipeline.py`` using the
+low-level helpers here inside a single transaction.
 
 Ground-truth schema facts (verified against CE v1.3.1, see verify.py):
   * pages.sort_order is NOT NULL with NO column default -> we supply one.
@@ -63,12 +64,12 @@ def _is_uuid(value: str) -> bool:
 
 
 class Database:
-    def __init__(self, database_url: str, workspace_slug: str) -> None:
+    def __init__(self, database_url: str) -> None:
         self._pool = ConnectionPool(
             database_url, min_size=1, max_size=4, open=True, kwargs={"row_factory": dict_row}
         )
-        self._workspace_slug = workspace_slug
-        self._workspace_id: str | None = None
+        # slug -> workspace uuid, populated on demand (any call may name a new one).
+        self._workspace_ids: dict[str, str] = {}
 
     def close(self) -> None:
         self._pool.close()
@@ -80,26 +81,33 @@ class Database:
 
     # --- resolution -----------------------------------------------------
 
-    @property
-    def workspace_id(self) -> str:
-        if self._workspace_id is None:
-            self._workspace_id = self.resolve_workspace(self._workspace_slug)
-        return self._workspace_id
-
     def resolve_workspace(self, slug: str) -> str:
+        """Slug -> workspace uuid, cached. Unknown slug lists the ones that exist."""
+        if slug in self._workspace_ids:
+            return self._workspace_ids[slug]
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT id FROM workspaces WHERE slug = %s AND deleted_at IS NULL",
                 (slug,),
             ).fetchone()
-        if not row:
-            raise NotFoundError(f"workspace slug {slug!r} not found")
-        return str(row["id"])
+            if not row:
+                existing = [
+                    r["slug"]
+                    for r in conn.execute(
+                        "SELECT slug FROM workspaces WHERE deleted_at IS NULL ORDER BY slug"
+                    ).fetchall()
+                ]
+                raise NotFoundError(
+                    f"workspace {slug!r} not found; existing workspaces: {existing}"
+                )
+        ws_id = str(row["id"])
+        self._workspace_ids[slug] = ws_id
+        return ws_id
 
-    def resolve_project(self, project_ref: str) -> dict[str, Any]:
+    def resolve_project(self, workspace_id: str, project_ref: str) -> dict[str, Any]:
         """Resolve a project by UUID or (case-insensitive) identifier.
 
-        Returns {id, identifier, name}. Scoped to the configured workspace.
+        Returns {id, identifier, name}. Scoped to the given workspace.
         """
         where = "id = %s" if _is_uuid(project_ref) else "UPPER(identifier) = UPPER(%s)"
         with self._conn() as conn:
@@ -108,21 +116,21 @@ class Database:
                 SELECT id, identifier, name FROM projects
                 WHERE {where} AND workspace_id = %s AND deleted_at IS NULL
                 """,
-                (project_ref, self.workspace_id),
+                (project_ref, workspace_id),
             ).fetchone()
         if not row:
             raise NotFoundError(
-                f"project {project_ref!r} not found in workspace {self._workspace_slug!r}"
+                f"project {project_ref!r} not found in the target workspace"
             )
         return {"id": str(row["id"]), "identifier": row["identifier"], "name": row["name"]}
 
     # --- reads ----------------------------------------------------------
 
     def list_pages(
-        self, project_id: str | None, include_archived: bool, limit: int
+        self, workspace_id: str, project_id: str | None, include_archived: bool, limit: int
     ) -> list[dict[str, Any]]:
         clauses = ["p.workspace_id = %s", "p.deleted_at IS NULL"]
-        params: list[Any] = [self.workspace_id]
+        params: list[Any] = [workspace_id]
         if project_id is not None:
             clauses.append(
                 "EXISTS (SELECT 1 FROM project_pages pp "
@@ -146,7 +154,7 @@ class Database:
             ).fetchall()
         return [_page_summary(r) for r in rows]
 
-    def search_pages(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def search_pages(self, workspace_id: str, query: str, limit: int) -> list[dict[str, Any]]:
         like = f"%{query}%"
         with self._conn() as conn:
             rows = conn.execute(
@@ -159,7 +167,7 @@ class Database:
                 ORDER BY p.updated_at DESC
                 LIMIT %s
                 """,
-                (self.workspace_id, like, like, limit),
+                (workspace_id, like, like, limit),
             ).fetchall()
         out = []
         for r in rows:
@@ -169,27 +177,33 @@ class Database:
         return out
 
     def read_page(self, page_id: str) -> dict[str, Any] | None:
+        # page_id is globally unique, so no workspace filter is needed; we return
+        # the owning workspace's slug so the caller can tell where it came from.
         with self._conn() as conn:
             row = conn.execute(
                 f"""
                 SELECT p.id, p.name, p.description_html, p.access, p.is_locked,
                        p.archived_at, p.created_at, p.updated_at, p.owned_by_id,
+                       w.slug AS workspace_slug,
                        {_project_identifiers_subquery()}
                 FROM pages p
-                WHERE p.id = %s AND p.workspace_id = %s AND p.deleted_at IS NULL
+                JOIN workspaces w ON w.id = p.workspace_id
+                WHERE p.id = %s AND p.deleted_at IS NULL
                 """,
-                (page_id, self.workspace_id),
+                (page_id,),
             ).fetchone()
         return row
 
     def get_page_html(self, conn: psycopg.Connection, page_id: str) -> str | None:
+        # No workspace filter: update_page targets a globally-unique page id and
+        # inherits that page's workspace.
         row = conn.execute(
             """
             SELECT description_html FROM pages
-            WHERE id = %s AND workspace_id = %s AND deleted_at IS NULL
+            WHERE id = %s AND deleted_at IS NULL
             FOR UPDATE
             """,
-            (page_id, self.workspace_id),
+            (page_id,),
         ).fetchone()
         return None if row is None else (row["description_html"] or "")
 
@@ -217,7 +231,7 @@ class Database:
         ]
         if name is not None:
             params.append(name)
-        params.extend([page_id, self.workspace_id])
+        params.append(page_id)
         cur = conn.execute(
             f"""
             UPDATE pages
@@ -228,16 +242,26 @@ class Database:
                 updated_by_id = %s,
                 updated_at = now()
                 {set_name}
-            WHERE id = %s AND workspace_id = %s AND deleted_at IS NULL
+            WHERE id = %s AND deleted_at IS NULL
             """,
             params,
         )
         return cur.rowcount
 
+    def next_sort_order(self, conn: psycopg.Connection, workspace_id: str) -> float:
+        """Per-workspace: max(sort_order)+65535, or 65535 when the workspace is empty."""
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) AS m FROM pages "
+            "WHERE workspace_id = %s AND deleted_at IS NULL",
+            (workspace_id,),
+        ).fetchone()
+        return float(row["m"]) + DEFAULT_SORT_ORDER
+
     def insert_page(
         self,
         conn: psycopg.Connection,
         *,
+        workspace_id: str,
         name: str,
         html: str,
         json_doc: Any,
@@ -245,8 +269,10 @@ class Database:
         stripped: str,
         access: int,
         service_user_id: str,
-        sort_order: float = DEFAULT_SORT_ORDER,
+        sort_order: float | None = None,
     ) -> str:
+        if sort_order is None:
+            sort_order = self.next_sort_order(conn, workspace_id)
         page_id = str(uuid.uuid4())
         conn.execute(
             """
@@ -276,14 +302,20 @@ class Database:
                 "view_props": Jsonb(DEFAULT_VIEW_PROPS),
                 "logo_props": Jsonb(DEFAULT_LOGO_PROPS),
                 "sort_order": sort_order,
-                "workspace_id": self.workspace_id,
+                "workspace_id": workspace_id,
                 "user": service_user_id,
             },
         )
         return page_id
 
     def insert_project_page(
-        self, conn: psycopg.Connection, *, page_id: str, project_id: str, service_user_id: str
+        self,
+        conn: psycopg.Connection,
+        *,
+        workspace_id: str,
+        page_id: str,
+        project_id: str,
+        service_user_id: str,
     ) -> str:
         link_id = str(uuid.uuid4())
         conn.execute(
@@ -300,7 +332,7 @@ class Database:
                 "id": link_id,
                 "page_id": page_id,
                 "project_id": project_id,
-                "workspace_id": self.workspace_id,
+                "workspace_id": workspace_id,
                 "user": service_user_id,
             },
         )

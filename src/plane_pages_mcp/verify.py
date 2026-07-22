@@ -1,8 +1,11 @@
 """Phase 0 runtime verification.
 
-Connects to the DB and the live service and checks every assumption the write
-pipeline relies on, printing a report and exiting non-zero on any mismatch.
-Run after every Plane upgrade.
+Checks each subsystem independently and reports both:
+  * pages — DB schema assumptions + live converter.
+  * rest  — per-endpoint status against the public REST API for the configured
+            (default) workspace.
+Exits non-zero on any failure in an *enabled* subsystem. A disabled subsystem
+is reported as skipped, never as a failure. Run after every Plane upgrade.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from psycopg.rows import dict_row
 
 from .config import Config
 from .db import PAGES_INSERT_COLUMNS, PROJECT_PAGES_INSERT_COLUMNS
+from .rest import PlaneREST
 
 EXPECTED_TABLES = ["pages", "project_pages", "projects", "workspaces"]
 DESCRIPTION_COLUMNS = [
@@ -62,16 +66,17 @@ def _columns(conn: psycopg.Connection, table: str) -> set[str]:
     return {r["column_name"] for r in rows}
 
 
-def verify(cfg: Config) -> int:
-    report = _Report()
-    print(f"plane_pages_mcp verify — workspace={cfg.workspace_slug!r}")
+def _verify_pages(cfg: Config, report: _Report) -> None:
+    print("\n== Pages subsystem (DB + live converter) ==")
+    if not cfg.pages_enabled:
+        report.info("pages", "disabled (no DATABASE_URL) — skipped")
+        return
 
-    # --- database ------------------------------------------------------
     try:
         conn = psycopg.connect(cfg.database_url, row_factory=dict_row)
     except psycopg.Error as exc:
-        print(f"  [FAIL] connect to DATABASE_URL — {exc}")
-        return 1
+        report.check(False, "connect to DATABASE_URL", str(exc))
+        return
 
     with conn:
         print("\nDatabase:")
@@ -88,7 +93,6 @@ def verify(cfg: Config) -> int:
         for c in DESCRIPTION_COLUMNS:
             report.check(c in pages_cols, f"pages.{c} present")
 
-        # NOT-NULL-without-default columns must all be covered by INSERT builders.
         pages_required = _required_columns(conn, "pages")
         missing_pages = pages_required - PAGES_INSERT_COLUMNS
         report.check(
@@ -106,42 +110,47 @@ def verify(cfg: Config) -> int:
             "" if not missing_pp else f"UNCOVERED: {sorted(missing_pp)}",
         )
 
-        # Soft-delete: reads must filter deleted_at IS NULL (they do — see db.py).
         has_deleted_at = "deleted_at" in pages_cols
         report.check(
             has_deleted_at,
             "pages.deleted_at present (reads filter deleted_at IS NULL)",
-            "" if has_deleted_at else "column absent — remove the filter if this is intended",
+            "" if has_deleted_at else "column absent — remove the filter if intended",
         )
 
-        # Resolutions.
-        ws = conn.execute(
-            "SELECT id FROM workspaces WHERE slug = %s AND deleted_at IS NULL",
-            (cfg.workspace_slug,),
-        ).fetchone()
-        report.check(ws is not None, f"workspace slug {cfg.workspace_slug!r} resolves")
-        if ws:
-            report.info("workspace id", str(ws["id"]))
+        # Workspace enumeration (multi-workspace): list what exists.
+        slugs = [
+            r["slug"]
+            for r in conn.execute(
+                "SELECT slug FROM workspaces WHERE deleted_at IS NULL ORDER BY slug"
+            ).fetchall()
+        ]
+        report.info("workspaces present", str(slugs))
+
+        if cfg.workspace_slug:
+            ws = conn.execute(
+                "SELECT id FROM workspaces WHERE slug = %s AND deleted_at IS NULL",
+                (cfg.workspace_slug,),
+            ).fetchone()
+            report.check(ws is not None, f"default WORKSPACE_SLUG {cfg.workspace_slug!r} resolves")
+        else:
+            report.info("default WORKSPACE_SLUG", "unset — callers must pass workspace explicitly")
 
         user = conn.execute(
-            "SELECT id, email FROM users WHERE id = %s",
-            (cfg.service_user_id,),
+            "SELECT id, email FROM users WHERE id = %s", (cfg.service_user_id,)
         ).fetchone()
         report.check(user is not None, "SERVICE_USER_ID exists in users")
         if user:
             report.info("service user", f"{user['id']} ({user['email']})")
 
-        default = conn.execute(
+        sd = conn.execute(
             "SELECT column_default FROM information_schema.columns "
             "WHERE table_name='pages' AND column_name='sort_order'"
         ).fetchone()
         report.info(
             "pages.sort_order db default",
-            (default["column_default"] if default else "?")
-            or "NONE (app supplies 65535)",
+            (sd["column_default"] if sd else "?") or "NONE (app computes per-workspace)",
         )
 
-    # --- live convert endpoint -----------------------------------------
     print("\nLive converter:")
     try:
         resp = httpx.post(
@@ -160,10 +169,80 @@ def verify(cfg: Config) -> int:
             report.check(has_keys, "response has description_json + description_binary")
             if has_keys:
                 binary = base64.b64decode(data["description_binary"])
-                report.check(len(binary) > 0, "description_binary decodes to non-empty bytes",
-                             f"{len(binary)} bytes")
+                report.check(
+                    len(binary) > 0,
+                    "description_binary decodes to non-empty bytes",
+                    f"{len(binary)} bytes",
+                )
     except (httpx.HTTPError, ValueError) as exc:
         report.check(False, f"POST {cfg.live_convert_url}", str(exc))
+
+
+def _verify_rest(cfg: Config, report: _Report) -> None:
+    print("\n== Work-items subsystem (public REST API) ==")
+    if not cfg.rest_enabled:
+        report.info("rest", "disabled (no PLANE_BASE_URL/PLANE_API_KEY) — skipped")
+        return
+    slug = cfg.workspace_slug
+    if not slug:
+        report.check(
+            False,
+            "REST verify needs a workspace",
+            "set WORKSPACE_SLUG (used as the default) to probe endpoints",
+        )
+        return
+
+    report.info("REST base", f"{cfg.plane_base_url}/api/v1 (workspace {slug!r})")
+    rest = PlaneREST(cfg.plane_base_url, cfg.plane_api_key)
+    try:
+        # workspace-level endpoint first; also gives us a project id for the rest.
+        code = rest.status_of("GET", f"workspaces/{slug}/projects/")
+        report.check(code == 200, f"GET workspaces/{slug}/projects/", f"status {code}")
+
+        project_id = None
+        if code == 200:
+            projects = rest.list_projects(slug)
+            if projects:
+                project_id = str(projects[0]["id"])
+                report.info("probe project", f"{projects[0].get('identifier')} ({project_id})")
+            else:
+                report.info("projects", "none in this workspace — project endpoints skipped")
+
+        if project_id:
+            base = f"workspaces/{slug}/projects/{project_id}"
+            probes = [
+                ("GET", f"{base}/issues/", "list work items"),
+                ("GET", f"{base}/states/", "list states"),
+                ("GET", f"{base}/labels/", "list labels"),
+                ("GET", f"{base}/members/", "list members"),
+                ("GET", f"{base}/cycles/", "list cycles"),
+                ("GET", f"{base}/modules/", "list modules"),
+            ]
+            for method, path, label in probes:
+                c = rest.status_of(method, path)
+                report.check(c == 200, f"{label} ({method} .../{path.split('/')[-2]}/)", f"status {c}")
+
+            # get single work item, if any exist
+            issues = rest.list_issues(slug, project_id)
+            if issues:
+                iid = str(issues[0]["id"])
+                c = rest.status_of("GET", f"{base}/issues/{iid}/")
+                report.check(c == 200, "get work item (GET .../issues/{id}/)", f"status {c}")
+            else:
+                report.info("work items", "none present — single-item GET skipped")
+    finally:
+        rest.close()
+
+
+def verify(cfg: Config) -> int:
+    report = _Report()
+    print("plane_pages_mcp verify")
+    print(
+        f"  capabilities: pages={'on' if cfg.pages_enabled else 'off'}, "
+        f"work_items={'on' if cfg.rest_enabled else 'off'}"
+    )
+    _verify_pages(cfg, report)
+    _verify_rest(cfg, report)
 
     print()
     if report.ok:

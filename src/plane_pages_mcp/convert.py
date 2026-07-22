@@ -6,12 +6,16 @@ a database or the live service.
 
 from __future__ import annotations
 
-import markdown as _markdown
 from bs4 import BeautifulSoup
+from markdown_it import MarkdownIt
 from markdownify import markdownify as _markdownify
 
-# Extensions kept in sync with the workpackage §3 contract.
-_MD_EXTENSIONS = ["tables", "fenced_code"]
+# CommonMark + GitHub-flavoured tables + strikethrough. CommonMark (unlike
+# python-markdown) lets a list interrupt a paragraph, so natural markdown like
+# "…and a list:\n- one\n- two" renders as a real <ul> without a blank line.
+# Fenced code is native to CommonMark. Linkify is intentionally NOT enabled
+# (avoids the optional linkify-it-py dependency and surprise auto-links).
+_MD = MarkdownIt("commonmark").enable(["table", "strikethrough"])
 
 
 class ContentError(ValueError):
@@ -19,8 +23,8 @@ class ContentError(ValueError):
 
 
 def markdown_to_html(text: str) -> str:
-    """Render markdown to HTML using the tables + fenced_code extensions."""
-    return _markdown.markdown(text, extensions=_MD_EXTENSIONS)
+    """Render markdown to HTML (CommonMark + tables + strikethrough)."""
+    return _MD.render(text)
 
 
 def to_html(content: str, fmt: str) -> str:

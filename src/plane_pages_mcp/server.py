@@ -1,4 +1,10 @@
-"""FastMCP server: 5 page tools + /healthz, with Bearer auth in http mode.
+"""FastMCP server: pages tools (DB) + work-item tools (REST) + /healthz.
+
+Two subsystems register independently based on configuration:
+  * pages  — needs DATABASE_URL; multi-workspace, DB + live converter.
+  * items  — needs PLANE_BASE_URL + PLANE_API_KEY; public REST API.
+A missing PAT never breaks pages and a missing DB never breaks work items;
+degraded capability is logged at startup and reported by ``verify``.
 
 Transport:
   * http  — streamable HTTP on 0.0.0.0:8300/mcp, every request must carry a
@@ -17,70 +23,132 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
-from . import convert, pipeline
+from . import convert, pipeline, workitems
 from .config import Config
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
+from .rest import PlaneREST, RestError
+from .workitems import WorkItemError
 
 log = logging.getLogger("plane_pages_mcp")
 
 
+class WorkspaceUnset(ValueError):
+    """Neither an explicit workspace argument nor WORKSPACE_SLUG was provided."""
+
+
 class AppState:
-    """Shared handles created once at startup."""
+    """Shared handles created once at startup (only for enabled subsystems)."""
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.db = Database(cfg.database_url, cfg.workspace_slug)
-        self.live = LiveConverter(cfg.live_convert_url)
+        self.db: Database | None = None
+        self.live: LiveConverter | None = None
+        self.rest: PlaneREST | None = None
+        if cfg.pages_enabled:
+            self.db = Database(cfg.database_url)
+            self.live = LiveConverter(cfg.live_convert_url)
+        if cfg.rest_enabled:
+            self.rest = PlaneREST(cfg.plane_base_url, cfg.plane_api_key)
 
-    def page_url(self, page_id: str, project_id: str | None) -> str:
-        base = f"{self.cfg.web_url}/{self.cfg.workspace_slug}"
+    def workspace_slug(self, explicit: str | None) -> str:
+        """Resolution order: explicit argument -> WORKSPACE_SLUG env -> error."""
+        slug = explicit or self.cfg.workspace_slug
+        if not slug:
+            raise WorkspaceUnset(
+                "no workspace given: pass the `workspace` argument or set the "
+                "WORKSPACE_SLUG default"
+            )
+        return slug
+
+    def page_url(self, slug: str, page_id: str, project_id: str | None) -> str:
+        base = f"{self.cfg.web_url}/{slug}"
         if project_id:
             return f"{base}/projects/{project_id}/pages/{page_id}"
         return f"{base}/pages/{page_id}"
 
+    def close(self) -> None:
+        if self.db:
+            self.db.close()
+        if self.rest:
+            self.rest.close()
+
 
 def build_mcp(state: AppState) -> FastMCP:
     mcp = FastMCP("plane_pages_mcp")
+    if state.db is not None:
+        _register_page_tools(mcp, state)
+    if state.rest is not None:
+        _register_work_item_tools(mcp, state)
+
+    @mcp.custom_route("/healthz", methods=["GET"])
+    async def healthz(_request: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
+    return mcp
+
+
+# --- pages (DB) --------------------------------------------------------
+
+
+def _register_page_tools(mcp: FastMCP, state: AppState) -> None:
+    db = state.db
 
     @mcp.tool
     def list_pages(
+        workspace: str | None = None,
         project: str | None = None,
         include_archived: bool = False,
         limit: int = 50,
     ) -> dict:
-        """List Plane pages, newest first.
+        """List Plane pages in a workspace, newest first.
 
         Args:
-            project: project identifier (e.g. "ENG") or UUID; omit to list the
-                whole workspace.
+            workspace: workspace slug to read from (accepts a slug like "eng").
+                Defaults to the server's configured WORKSPACE_SLUG when omitted;
+                results are scoped to this workspace only.
+            project: project identifier (e.g. "ENG") or UUID; omit for the whole
+                workspace.
             include_archived: include archived pages when True.
             limit: max pages to return (default 50).
         """
-        project_id = None
-        if project:
-            try:
-                project_id = state.db.resolve_project(project)["id"]
-            except NotFoundError as exc:
-                return _error(str(exc))
-        rows = state.db.list_pages(project_id, include_archived, _clamp(limit, 200))
+        try:
+            ws_id = db.resolve_workspace(state.workspace_slug(workspace))
+            project_id = db.resolve_project(ws_id, project)["id"] if project else None
+        except (NotFoundError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+        rows = db.list_pages(ws_id, project_id, include_archived, _clamp(limit, 200))
         return {"pages": rows, "count": len(rows)}
 
     @mcp.tool
-    def search_pages(query: str, limit: int = 20) -> dict:
-        """Case-insensitive search over page name and body text.
+    def search_pages(query: str, workspace: str | None = None, limit: int = 20) -> dict:
+        """Search page name + body text within one workspace (case-insensitive).
 
-        Returns each match with a ±120-char snippet around the first hit.
+        Args:
+            query: text to match on page name or body.
+            workspace: workspace slug to search (defaults to the server's
+                configured WORKSPACE_SLUG). Results are scoped to this workspace
+                only — a search never returns another workspace's pages.
+            limit: max hits (default 20).
+
+        Each hit includes a ±120-char snippet around the first match.
         """
         if not query.strip():
             return _error("query must not be empty")
-        rows = state.db.search_pages(query, _clamp(limit, 100))
+        try:
+            ws_id = db.resolve_workspace(state.workspace_slug(workspace))
+        except (NotFoundError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+        rows = db.search_pages(ws_id, query, _clamp(limit, 100))
         return {"pages": rows, "count": len(rows)}
 
     @mcp.tool
     def read_page(page_id: str, format: str = "markdown") -> dict:
         """Read one page's metadata and content.
+
+        The page id is globally unique, so no workspace is needed; the owning
+        workspace slug is returned so you can tell where it came from.
 
         Args:
             page_id: the page UUID.
@@ -88,14 +156,15 @@ def build_mcp(state: AppState) -> FastMCP:
         """
         if format not in ("markdown", "html"):
             return _error("format must be 'markdown' or 'html'")
-        row = state.db.read_page(page_id)
+        row = db.read_page(page_id)
         if row is None:
-            return _error(f"page {page_id} not found in workspace")
+            return _error(f"page {page_id} not found")
         html = row["description_html"] or ""
         content = html if format == "html" else convert.html_to_markdown(html)
         return {
             "id": str(row["id"]),
             "name": row["name"],
+            "workspace": row["workspace_slug"],
             "project_identifiers": list(row.get("project_identifiers") or []),
             "access": "private" if row["access"] == 1 else "public",
             "is_locked": row["is_locked"],
@@ -111,6 +180,7 @@ def build_mcp(state: AppState) -> FastMCP:
         title: str,
         content: str,
         project: str,
+        workspace: str,
         format: str = "markdown",
         access: str = "public",
     ) -> dict:
@@ -120,13 +190,19 @@ def build_mcp(state: AppState) -> FastMCP:
             title: page title.
             content: markdown (default) or HTML body — see ``format``.
             project: project identifier or UUID the page belongs to.
+            workspace: workspace slug — REQUIRED (no default, to avoid a page
+                silently landing in the wrong workspace).
             format: "markdown" or "html".
             access: "public" or "private".
         """
+        if not workspace:
+            return _error("workspace is required for create_page (no default is applied)")
         try:
+            ws_id = db.resolve_workspace(workspace)
             result = pipeline.create_page(
-                state.db,
+                db,
                 state.live,
+                workspace_id=ws_id,
                 title=title,
                 content=content,
                 project=project,
@@ -134,11 +210,12 @@ def build_mcp(state: AppState) -> FastMCP:
                 access=access,
                 service_user_id=state.cfg.service_user_id,
             )
-        except (WriteError, ConvertError, convert.ContentError) as exc:
+            project_id = db.resolve_project(ws_id, project)["id"]
+        except (WriteError, ConvertError, convert.ContentError, NotFoundError) as exc:
             return _error(str(exc))
-        project_id = state.db.resolve_project(project)["id"]
-        result["url"] = state.page_url(result["id"], project_id)
-        log.info("created page %s in project %s", result["id"], result["project"])
+        result["workspace"] = workspace
+        result["url"] = state.page_url(workspace, result["id"], project_id)
+        log.info("created page %s in %s/%s", result["id"], workspace, result["project"])
         return result
 
     @mcp.tool
@@ -151,6 +228,9 @@ def build_mcp(state: AppState) -> FastMCP:
     ) -> dict:
         """Update a page's content (and optionally its title).
 
+        Targets a globally-unique page id and inherits that page's workspace, so
+        no workspace argument is needed.
+
         Args:
             page_id: the page UUID.
             content: markdown (default) or HTML — see ``format``.
@@ -160,7 +240,7 @@ def build_mcp(state: AppState) -> FastMCP:
         """
         try:
             result = pipeline.update_page(
-                state.db,
+                db,
                 state.live,
                 page_id=page_id,
                 content=content,
@@ -174,11 +254,180 @@ def build_mcp(state: AppState) -> FastMCP:
         log.info("updated page %s (mode=%s)", page_id, mode)
         return result
 
-    @mcp.custom_route("/healthz", methods=["GET"])
-    async def healthz(_request: Request) -> PlainTextResponse:
-        return PlainTextResponse("ok")
 
-    return mcp
+# --- work items (REST) -------------------------------------------------
+
+
+def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
+    rest = state.rest
+
+    def _slug(workspace: str | None) -> str:
+        return state.workspace_slug(workspace)
+
+    @mcp.tool
+    def list_projects(workspace: str | None = None) -> dict:
+        """List projects in a workspace (REST).
+
+        Args:
+            workspace: workspace slug (accepts a slug like "eng"); defaults to
+                the server's configured WORKSPACE_SLUG when omitted.
+
+        Returns id, name, identifier, description.
+        """
+        try:
+            return workitems.list_projects(rest, _slug(workspace))
+        except (RestError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def list_work_items(
+        project: str,
+        workspace: str | None = None,
+        state_name: str | None = None,
+        assignee: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        """List work items (issues) in a project (REST).
+
+        Args:
+            project: project identifier (e.g. "TEST") or UUID.
+            workspace: workspace slug; defaults to the server's configured
+                WORKSPACE_SLUG when omitted.
+            state_name: optional state name filter (e.g. "In Progress").
+            assignee: optional assignee display-name/email filter.
+            limit: max items (default 50).
+
+        States and assignees are returned as names, not UUIDs.
+        """
+        try:
+            return workitems.list_work_items(
+                rest, _slug(workspace), project,
+                state=state_name, assignee=assignee, limit=_clamp(limit, 200),
+            )
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def get_work_item(item: str, project: str, workspace: str | None = None) -> dict:
+        """Get one work item's full detail (REST).
+
+        Args:
+            item: sequence id (e.g. "TEST-42") or issue UUID.
+            project: project identifier or UUID.
+            workspace: workspace slug; defaults to the server's configured
+                WORKSPACE_SLUG when omitted.
+
+        Description is returned as markdown; state/assignees/labels as names.
+        """
+        try:
+            return workitems.get_work_item(rest, _slug(workspace), project, item)
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def create_work_item(
+        project: str,
+        title: str,
+        workspace: str,
+        description: str | None = None,
+        state_name: str | None = None,
+        priority: str | None = None,
+        assignees: list[str] | None = None,
+        labels: list[str] | None = None,
+        parent: str | None = None,
+    ) -> dict:
+        """Create a work item (issue) via REST.
+
+        Args:
+            project: project identifier or UUID.
+            title: work item title.
+            workspace: workspace slug — REQUIRED (no default, to avoid creating
+                in the wrong workspace).
+            description: optional markdown body (Plane fills the rich/binary reps).
+            state_name: optional state name (e.g. "Todo"); resolved to its id.
+            priority: one of urgent/high/medium/low/none.
+            assignees: optional list of member display names or emails.
+            labels: optional list of label names.
+            parent: optional parent work item (sequence ref like "TEST-42" or a
+                UUID) — set it to create this item as a sub-work-item.
+
+        Unknown state/priority/assignee/label/parent names return an error
+        listing the valid options.
+        """
+        if not workspace:
+            return _error("workspace is required for create_work_item (no default is applied)")
+        try:
+            return workitems.create_work_item(
+                rest, workspace, project,
+                title=title, description=description, state=state_name,
+                priority=priority, assignees=assignees, labels=labels, parent=parent,
+            )
+        except (RestError, WorkItemError, convert.ContentError) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def update_work_item(
+        item: str,
+        project: str,
+        workspace: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        state_name: str | None = None,
+        priority: str | None = None,
+        assignees: list[str] | None = None,
+        labels: list[str] | None = None,
+        parent: str | None = None,
+    ) -> dict:
+        """Partially update a work item (REST).
+
+        Only the fields you supply are sent; others are left untouched.
+
+        Args:
+            item: sequence id ("TEST-42") or issue UUID.
+            project: project identifier or UUID.
+            workspace: workspace slug; defaults to the server's configured
+                WORKSPACE_SLUG when omitted.
+            title / description / state_name / priority / assignees / labels:
+                any subset to change. Unknown names error with valid options.
+            parent: re-parent under this work item (sequence ref or UUID) to make
+                it a sub-work-item.
+        """
+        try:
+            return workitems.update_work_item(
+                rest, _slug(workspace), project, item,
+                title=title, description=description, state=state_name,
+                priority=priority, assignees=assignees, labels=labels, parent=parent,
+            )
+        except (RestError, WorkItemError, WorkspaceUnset, convert.ContentError) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def list_states(project: str, workspace: str | None = None) -> dict:
+        """List a project's states so you can pick valid state names (REST).
+
+        Args:
+            project: project identifier or UUID.
+            workspace: workspace slug; defaults to the server's configured
+                WORKSPACE_SLUG when omitted.
+        """
+        try:
+            return workitems.list_states(rest, _slug(workspace), project)
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def list_labels(project: str, workspace: str | None = None) -> dict:
+        """List a project's labels so you can pick valid label names (REST).
+
+        Args:
+            project: project identifier or UUID.
+            workspace: workspace slug; defaults to the server's configured
+                WORKSPACE_SLUG when omitted.
+        """
+        try:
+            return workitems.list_labels(rest, _slug(workspace), project)
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
 
 
 def _clamp(limit: int, hard_max: int) -> int:
@@ -209,6 +458,12 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _capability_line(cfg: Config) -> str:
+    pages = "on" if cfg.pages_enabled else "OFF (no DATABASE_URL)"
+    rest = "on" if cfg.rest_enabled else "OFF (no PLANE_BASE_URL/PLANE_API_KEY)"
+    return f"capabilities: pages={pages}, work_items={rest}"
+
+
 def run(cfg: Config) -> None:
     logging.basicConfig(
         level=getattr(logging, cfg.log_level, logging.INFO),
@@ -216,13 +471,14 @@ def run(cfg: Config) -> None:
     )
     state = AppState(cfg)
     mcp = build_mcp(state)
+    log.info(_capability_line(cfg))
 
     if cfg.transport == "stdio":
         log.info("starting plane_pages_mcp on stdio")
         try:
             mcp.run(transport="stdio")
         finally:
-            state.db.close()
+            state.close()
         return
 
     middleware = [Middleware(BearerAuthMiddleware, token=cfg.mcp_auth_token)]
@@ -231,4 +487,4 @@ def run(cfg: Config) -> None:
     try:
         uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=cfg.log_level.lower())
     finally:
-        state.db.close()
+        state.close()
