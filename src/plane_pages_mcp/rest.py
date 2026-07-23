@@ -166,11 +166,62 @@ class PlaneREST:
     def list_members(self, slug: str, project_id: str) -> list[dict]:
         return self._paginated(f"workspaces/{slug}/projects/{project_id}/members/")
 
+    # --- containers: cycles & modules (structurally identical) ----------
+    #
+    # kind is "cycles" or "modules". Issue membership is a separate sub-resource
+    # ("cycle-issues" / "module-issues"), not a field on the issue payload.
+
     def list_cycles(self, slug: str, project_id: str) -> list[dict]:
-        return self._paginated(f"workspaces/{slug}/projects/{project_id}/cycles/")
+        return self.list_containers(slug, project_id, "cycles")
 
     def list_modules(self, slug: str, project_id: str) -> list[dict]:
-        return self._paginated(f"workspaces/{slug}/projects/{project_id}/modules/")
+        return self.list_containers(slug, project_id, "modules")
+
+    def list_containers(self, slug: str, project_id: str, kind: str) -> list[dict]:
+        return self._paginated(f"workspaces/{slug}/projects/{project_id}/{kind}/")
+
+    def resolve_container(self, slug: str, project_id: str, kind: str, ref: str) -> dict:
+        """Resolve a cycle/module by UUID or (case-insensitive) name."""
+        items = self.list_containers(slug, project_id, kind)
+        for it in items:
+            if _is_uuid(ref) and str(it.get("id")) == ref:
+                return it
+            if str(it.get("name", "")).strip().lower() == ref.strip().lower():
+                return it
+        singular = kind[:-1]
+        raise RestNotFound(
+            f"{singular} {ref!r} not found in project; "
+            f"available: {[it.get('name') for it in items]}"
+        )
+
+    def create_container(self, slug: str, project_id: str, kind: str, payload: dict) -> dict:
+        return self._request(
+            "POST", f"workspaces/{slug}/projects/{project_id}/{kind}/", json=payload
+        )
+
+    def delete_container(self, slug: str, project_id: str, kind: str, container_id: str) -> None:
+        return self._request(
+            "DELETE", f"workspaces/{slug}/projects/{project_id}/{kind}/{container_id}/"
+        )
+
+    def add_issues_to_container(
+        self, slug: str, project_id: str, kind: str, container_id: str, issue_ids: list[str]
+    ) -> dict:
+        member = f"{kind[:-1]}-issues"  # cycles->cycle-issues, modules->module-issues
+        return self._request(
+            "POST",
+            f"workspaces/{slug}/projects/{project_id}/{kind}/{container_id}/{member}/",
+            json={"issues": issue_ids},
+        )
+
+    def remove_issue_from_container(
+        self, slug: str, project_id: str, kind: str, container_id: str, issue_id: str
+    ) -> None:
+        member = f"{kind[:-1]}-issues"
+        return self._request(
+            "DELETE",
+            f"workspaces/{slug}/projects/{project_id}/{kind}/{container_id}/{member}/{issue_id}/",
+        )
 
 
 def _parse_sequence(item_ref: str) -> int:

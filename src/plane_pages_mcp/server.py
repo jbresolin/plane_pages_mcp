@@ -22,8 +22,9 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from . import auth, convert, pipeline, relations, workitems
+from . import auth, containers, convert, pipeline, relations, workitems
 from .config import Config
+from .containers import ContainerError
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
@@ -81,6 +82,7 @@ def build_mcp(state: AppState, auth_provider=None) -> FastMCP:
         _register_page_tools(mcp, state)
     if state.rest is not None:
         _register_work_item_tools(mcp, state)
+        _register_cycle_module_tools(mcp, state)
     # Work-item relations live in the DB (absent from the REST API), so they are
     # gated on the DB subsystem, not REST.
     if state.db is not None:
@@ -506,6 +508,171 @@ def _register_relation_tools(mcp: FastMCP, state: AppState) -> None:
                 relation_type=relation_type, service_user_id=state.cfg.service_user_id,
             )
         except (RelationError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+
+# --- cycles & modules (REST) -------------------------------------------
+
+
+def _register_cycle_module_tools(mcp: FastMCP, state: AppState) -> None:
+    rest = state.rest
+
+    def _slug(workspace: str | None) -> str:
+        return state.workspace_slug(workspace)
+
+    _ERRORS = (RestError, ContainerError, WorkItemError, WorkspaceUnset)
+
+    # --- cycles ---
+
+    @mcp.tool
+    def list_cycles(project: str, workspace: str | None = None) -> dict:
+        """List cycles in a project (REST): id, name, start/end dates, issue counts.
+
+        `workspace` defaults to the configured WORKSPACE_SLUG when omitted.
+        """
+        try:
+            return containers.list_containers(rest, _slug(workspace), project, "cycles")
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def create_cycle(
+        project: str,
+        name: str,
+        workspace: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Create a cycle (REST).
+
+        Args:
+            project: project identifier or UUID.
+            name: cycle name.
+            workspace: workspace slug — REQUIRED (no default).
+            start_date / end_date: optional ISO dates (YYYY-MM-DD).
+            description: optional text.
+        """
+        if not workspace:
+            return _error("workspace is required for create_cycle (no default is applied)")
+        try:
+            return containers.create_container(
+                rest, workspace, project, "cycles",
+                name=name, start_date=start_date, end_date=end_date, description=description,
+            )
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def delete_cycle(cycle: str, project: str, workspace: str | None = None) -> dict:
+        """Delete a cycle by name or UUID (REST). Does not delete its issues."""
+        try:
+            return containers.delete_container(rest, _slug(workspace), project, "cycles", cycle)
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def assign_to_cycle(
+        cycle: str, items: list[str], project: str, workspace: str | None = None
+    ) -> dict:
+        """Add work items to a cycle (REST).
+
+        Args:
+            cycle: cycle name or UUID.
+            items: list of work-item sequence refs ("TEST-42") or UUIDs.
+            project: project identifier or UUID.
+            workspace: workspace slug (default WORKSPACE_SLUG).
+        """
+        try:
+            return containers.assign(rest, _slug(workspace), project, "cycles", cycle, items)
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def unassign_from_cycle(
+        cycle: str, items: list[str], project: str, workspace: str | None = None
+    ) -> dict:
+        """Remove work items from a cycle (REST). Items not in the cycle are ignored."""
+        try:
+            return containers.unassign(rest, _slug(workspace), project, "cycles", cycle, items)
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    # --- modules ---
+
+    @mcp.tool
+    def list_modules(project: str, workspace: str | None = None) -> dict:
+        """List modules in a project (REST): id, name, dates, status, issue counts.
+
+        `workspace` defaults to the configured WORKSPACE_SLUG when omitted.
+        """
+        try:
+            return containers.list_containers(rest, _slug(workspace), project, "modules")
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def create_module(
+        project: str,
+        name: str,
+        workspace: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Create a module (REST).
+
+        Args:
+            project: project identifier or UUID.
+            name: module name.
+            workspace: workspace slug — REQUIRED (no default).
+            start_date / end_date: optional ISO dates (YYYY-MM-DD); end_date maps
+                to the module's target date.
+            description: optional text.
+        """
+        if not workspace:
+            return _error("workspace is required for create_module (no default is applied)")
+        try:
+            return containers.create_container(
+                rest, workspace, project, "modules",
+                name=name, start_date=start_date, end_date=end_date, description=description,
+            )
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def delete_module(module: str, project: str, workspace: str | None = None) -> dict:
+        """Delete a module by name or UUID (REST). Does not delete its issues."""
+        try:
+            return containers.delete_container(rest, _slug(workspace), project, "modules", module)
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def assign_to_module(
+        module: str, items: list[str], project: str, workspace: str | None = None
+    ) -> dict:
+        """Add work items to a module (REST).
+
+        Args:
+            module: module name or UUID.
+            items: list of work-item sequence refs ("TEST-42") or UUIDs.
+            project: project identifier or UUID.
+            workspace: workspace slug (default WORKSPACE_SLUG).
+        """
+        try:
+            return containers.assign(rest, _slug(workspace), project, "modules", module, items)
+        except _ERRORS as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def unassign_from_module(
+        module: str, items: list[str], project: str, workspace: str | None = None
+    ) -> dict:
+        """Remove work items from a module (REST). Items not in the module are ignored."""
+        try:
+            return containers.unassign(rest, _slug(workspace), project, "modules", module, items)
+        except _ERRORS as exc:
             return _error(str(exc))
 
 

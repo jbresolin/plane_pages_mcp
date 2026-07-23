@@ -97,6 +97,16 @@ configured id — simpler, and attribution stays accurate.
 | `list_states(project, workspace?)` / `list_labels(project, workspace?)` | Discover valid state/label names. |
 | `link_work_items(item, related_item, relation_type, project, workspace?)` | Create a relation (needs the **DB** subsystem — relations aren't in the REST API). |
 | `unlink_work_items(item, related_item, relation_type, project, workspace?)` | Remove a relation. |
+| `list_cycles(project, workspace?)` / `list_modules(project, workspace?)` | id, name, dates, issue counts (modules also `status`). |
+| `create_cycle(project, name, workspace, start_date?, end_date?, description?)` / `create_module(…)` | **`workspace` required**. |
+| `delete_cycle(cycle, project, workspace?)` / `delete_module(module, project, workspace?)` | By name or UUID; leaves issues intact. |
+| `assign_to_cycle(cycle, items, project, workspace?)` / `assign_to_module(module, items, …)` | Add work items (list of `TEST-42`/UUIDs). |
+| `unassign_from_cycle(…)` / `unassign_from_module(…)` | Remove work items (non-members ignored). |
+
+**Cycles and modules** are fully served by the public REST API (create + delete +
+issue assignment via the `cycle-issues`/`module-issues` sub-resources), so these
+tools are pure-REST — no DB. `end_date` maps to a module's target date; cycle/
+module resolution accepts a name or UUID.
 
 **Work-item relations** are absent from CE's public REST API (like pages), so
 `link_work_items` / `unlink_work_items` write directly to Postgres and are gated
@@ -362,9 +372,10 @@ old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and co
   `page_versions` entries. Cosmetic, but be aware.
 - **Non-goals:** page delete/archive, nested pages (`parent`), image/asset upload
   in content, workspace-global page creation (`is_global`), the internal
-  session-auth app API; and for work items: delete, cycle/module membership,
-  attachments, comments, intake. (Sub-work-items **are** supported via `parent`,
-  and work-item **relations** via `link_work_items`/`unlink_work_items`.)
+  session-auth app API; and for work items: delete, attachments, comments,
+  intake. (Sub-work-items **are** supported via `parent`, work-item **relations**
+  via `link_work_items`/`unlink_work_items`, and **cycles/modules** — CRUD +
+  issue assignment — via the `*_cycle`/`*_module` tools.)
 
 ## Development
 
