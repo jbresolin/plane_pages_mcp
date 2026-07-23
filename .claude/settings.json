@@ -28,7 +28,10 @@
       "Bash(docker rm *)",
       "Bash(curl -s -o /dev/null --max-time 2 http://localhost:8388/healthz)",
       "Bash(kill 1119450)",
-      "Bash(pkill -9 -f \"plane-pages-mcp serve\")"
+      "Bash(pkill -9 -f \"plane-pages-mcp serve\")",
+      "mcp__claude_ai_Plane_MCP__list_projects",
+      "mcp__claude_ai_Plane_MCP__list_states",
+      "mcp__claude_ai_Plane_MCP__list_work_items"
     ]
   }
 }

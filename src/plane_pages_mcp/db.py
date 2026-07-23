@@ -49,6 +49,17 @@ PROJECT_PAGES_INSERT_COLUMNS = frozenset(
         "workspace_id", "created_by_id", "updated_by_id",
     }
 )
+ISSUE_RELATIONS_INSERT_COLUMNS = frozenset(
+    {
+        "id", "created_at", "updated_at", "relation_type", "issue_id",
+        "related_issue_id", "project_id", "workspace_id",
+        "created_by_id", "updated_by_id",
+    }
+)
+
+
+class DuplicateRelationError(RuntimeError):
+    """A relation already exists between these two work items in this direction."""
 
 
 class NotFoundError(LookupError):
@@ -337,6 +348,126 @@ class Database:
             },
         )
         return link_id
+
+    # --- work-item relations (issue_relations) --------------------------
+    #
+    # Work items are otherwise a pure-REST subsystem, but relations are absent
+    # from CE's public REST API (like pages), so they go straight to Postgres.
+    # Gated on DATABASE_URL being set.
+
+    def resolve_issue(self, workspace_id: str, project_id: str, item_ref: str) -> dict[str, Any]:
+        """Resolve an issue by UUID or sequence ref (e.g. 'TEST-42' or '42').
+
+        Returns {id, sequence_id}. Scoped to the given project/workspace.
+        """
+        if _is_uuid(item_ref):
+            where, param = "id = %s", item_ref
+        else:
+            tail = str(item_ref).rsplit("-", 1)[-1]
+            if not tail.isdigit():
+                raise NotFoundError(
+                    f"{item_ref!r} is neither a UUID nor a sequence ref like TEST-42"
+                )
+            where, param = "sequence_id = %s", int(tail)
+        with self._conn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT id, sequence_id FROM issues
+                WHERE {where} AND project_id = %s AND workspace_id = %s
+                  AND deleted_at IS NULL
+                """,
+                (param, project_id, workspace_id),
+            ).fetchone()
+        if not row:
+            raise NotFoundError(f"work item {item_ref!r} not found in the target project")
+        return {"id": str(row["id"]), "sequence_id": row["sequence_id"]}
+
+    def issue_ref(self, issue_id: str) -> str | None:
+        """issue uuid -> 'TEST-42' (identifier + sequence), or None if missing."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT pr.identifier, i.sequence_id
+                FROM issues i JOIN projects pr ON pr.id = i.project_id
+                WHERE i.id = %s AND i.deleted_at IS NULL
+                """,
+                (issue_id,),
+            ).fetchone()
+        return f"{row['identifier']}-{row['sequence_id']}" if row else None
+
+    def insert_issue_relation(
+        self,
+        conn: psycopg.Connection,
+        *,
+        workspace_id: str,
+        project_id: str,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+        service_user_id: str,
+    ) -> str:
+        rel_id = str(uuid.uuid4())
+        try:
+            conn.execute(
+                """
+                INSERT INTO issue_relations (
+                    id, created_at, updated_at,
+                    relation_type, issue_id, related_issue_id,
+                    project_id, workspace_id, created_by_id, updated_by_id
+                ) VALUES (
+                    %(id)s, now(), now(),
+                    %(type)s, %(issue)s, %(related)s,
+                    %(project)s, %(workspace)s, %(user)s, %(user)s
+                )
+                """,
+                {
+                    "id": rel_id,
+                    "type": relation_type,
+                    "issue": issue_id,
+                    "related": related_issue_id,
+                    "project": project_id,
+                    "workspace": workspace_id,
+                    "user": service_user_id,
+                },
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            # Unique on (issue_id, related_issue_id) where deleted_at IS NULL.
+            raise DuplicateRelationError(
+                "a relation already exists between these work items in this direction"
+            ) from exc
+        return rel_id
+
+    def delete_issue_relation(
+        self,
+        conn: psycopg.Connection,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> int:
+        """Hard-delete the matching active relation row; returns rowcount."""
+        cur = conn.execute(
+            """
+            DELETE FROM issue_relations
+            WHERE issue_id = %s AND related_issue_id = %s
+              AND relation_type = %s AND deleted_at IS NULL
+            """,
+            (issue_id, related_issue_id, relation_type),
+        )
+        return cur.rowcount
+
+    def read_issue_relations(self, issue_id: str) -> list[dict[str, Any]]:
+        """All active relations touching this issue, in either stored direction."""
+        with self._conn() as conn:
+            return conn.execute(
+                """
+                SELECT issue_id, related_issue_id, relation_type
+                FROM issue_relations
+                WHERE (issue_id = %s OR related_issue_id = %s)
+                  AND deleted_at IS NULL
+                """,
+                (issue_id, issue_id),
+            ).fetchall()
 
     @contextmanager
     def transaction(self) -> Iterator[psycopg.Connection]:

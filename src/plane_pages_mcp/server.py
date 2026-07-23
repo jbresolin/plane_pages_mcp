@@ -22,11 +22,12 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from . import auth, convert, pipeline, workitems
+from . import auth, convert, pipeline, relations, workitems
 from .config import Config
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
+from .relations import RelationError
 from .rest import PlaneREST, RestError
 from .workitems import WorkItemError
 
@@ -80,6 +81,10 @@ def build_mcp(state: AppState, auth_provider=None) -> FastMCP:
         _register_page_tools(mcp, state)
     if state.rest is not None:
         _register_work_item_tools(mcp, state)
+    # Work-item relations live in the DB (absent from the REST API), so they are
+    # gated on the DB subsystem, not REST.
+    if state.db is not None:
+        _register_relation_tools(mcp, state)
 
     # Identity allowlist gate (http/OAuth only). GitHubProvider proves *who* the
     # caller is; this decides *whether* they're allowed — applied globally.
@@ -322,11 +327,16 @@ def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
                 WORKSPACE_SLUG when omitted.
 
         Description is returned as markdown; state/assignees/labels as names.
+        When the DB subsystem is enabled, a `relations` list is included
+        (relations live outside the REST API — see link_work_items).
         """
         try:
-            return workitems.get_work_item(rest, _slug(workspace), project, item)
+            result = workitems.get_work_item(rest, _slug(workspace), project, item)
         except (RestError, WorkItemError, WorkspaceUnset) as exc:
             return _error(str(exc))
+        if state.db is not None:
+            result["relations"] = relations.for_issue(state.db, result["id"])
+        return result
 
     @mcp.tool
     def create_work_item(
@@ -431,6 +441,71 @@ def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
         try:
             return workitems.list_labels(rest, _slug(workspace), project)
         except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+
+# --- work-item relations (DB) ------------------------------------------
+
+
+def _register_relation_tools(mcp: FastMCP, state: AppState) -> None:
+    db = state.db
+
+    def _slug(workspace: str | None) -> str:
+        return state.workspace_slug(workspace)
+
+    @mcp.tool
+    def link_work_items(
+        item: str,
+        related_item: str,
+        relation_type: str,
+        project: str,
+        workspace: str | None = None,
+    ) -> dict:
+        """Create a relation between two work items: "item <relation_type> related_item".
+
+        Relations are absent from Plane's public API, so this writes directly to
+        the DB (requires the DB subsystem). Both items must be in `project`.
+
+        Args:
+            item: the subject work item (sequence ref like "TEST-42" or UUID).
+            related_item: the object work item (sequence ref or UUID).
+            relation_type: one of blocks, blocked_by, relates_to, duplicate,
+                start_before, start_after, finish_before, finish_after,
+                implements, implemented_by. (blocking = blocks.)
+            project: project identifier or UUID both items belong to.
+            workspace: workspace slug; defaults to the configured WORKSPACE_SLUG.
+
+        An unknown type, a self-relation, or a duplicate returns a clear error.
+        """
+        try:
+            return relations.link(
+                db, workspace=_slug(workspace), project=project,
+                item=item, related_item=related_item,
+                relation_type=relation_type, service_user_id=state.cfg.service_user_id,
+            )
+        except (RelationError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def unlink_work_items(
+        item: str,
+        related_item: str,
+        relation_type: str,
+        project: str,
+        workspace: str | None = None,
+    ) -> dict:
+        """Remove a relation between two work items (see link_work_items for types).
+
+        Removes the "item <relation_type> related_item" relation; errors if no
+        such relation exists.
+        """
+        try:
+            return relations.unlink(
+                db, workspace=_slug(workspace), project=project,
+                item=item, related_item=related_item,
+                relation_type=relation_type, service_user_id=state.cfg.service_user_id,
+            )
+        except (RelationError, WorkspaceUnset) as exc:
             return _error(str(exc))
 
 

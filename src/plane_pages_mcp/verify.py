@@ -19,14 +19,23 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .config import Config
-from .db import PAGES_INSERT_COLUMNS, PROJECT_PAGES_INSERT_COLUMNS
+from .db import (
+    ISSUE_RELATIONS_INSERT_COLUMNS,
+    PAGES_INSERT_COLUMNS,
+    PROJECT_PAGES_INSERT_COLUMNS,
+)
 from .rest import FORBIDDEN_HINT, PlaneREST
 
 EXPECTED_TABLES = ["pages", "project_pages", "projects", "workspaces"]
 # Every table a tool path reads (db.py) plus `users` (read by verify to validate
-# SERVICE_USER_ID). Writes touch pages/project_pages too but verify stays
-# read-only, so INSERT/UPDATE grants are documented rather than exercised.
-READ_TABLES = ["pages", "project_pages", "projects", "workspaces", "users"]
+# SERVICE_USER_ID). `issues`/`issue_relations` back the work-item relation tools
+# (gated on the DB subsystem). Writes touch pages/project_pages/issue_relations
+# too, but verify stays read-only, so INSERT/UPDATE/DELETE grants are documented
+# rather than exercised.
+READ_TABLES = [
+    "pages", "project_pages", "projects", "workspaces", "users",
+    "issues", "issue_relations",
+]
 DESCRIPTION_COLUMNS = [
     "description_html",
     "description_json",
@@ -149,6 +158,15 @@ def _verify_pages(cfg: Config, report: _Report) -> None:
             "project_pages INSERT covers every required column",
             "" if not missing_pp else f"UNCOVERED: {sorted(missing_pp)}",
         )
+
+        if "issue_relations" in existing:
+            ir_required = _required_columns(conn, "issue_relations")
+            missing_ir = ir_required - ISSUE_RELATIONS_INSERT_COLUMNS
+            report.check(
+                not missing_ir,
+                "issue_relations INSERT covers every required column",
+                "" if not missing_ir else f"UNCOVERED: {sorted(missing_ir)}",
+            )
 
         has_deleted_at = "deleted_at" in pages_cols
         report.check(

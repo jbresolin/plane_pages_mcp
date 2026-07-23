@@ -8,7 +8,9 @@ otherwise reach cleanly:
    writes go through Plane's own internal `live` HTML→Yjs converter so the
    collaborative-editor state stays consistent.
 2. **Work items** (public REST API) — issues/projects via Plane's supported CE
-   REST API (`x-api-key`), no DB access.
+   REST API (`x-api-key`). The one exception is **relations** (`blocks`,
+   `relates_to`, …), which CE omits from the API and which therefore go to
+   Postgres like pages — so they need the DB subsystem too.
 
 Both are **multi-workspace**: one instance may host several workspaces (work,
 family business, personal), and every tool is workspace-scoped so content never
@@ -93,6 +95,18 @@ configured id — simpler, and attribution stays accurate.
 | `create_work_item(project, title, workspace, description?, state_name?, priority?, assignees?, labels?, parent?)` | **`workspace` required**; human names resolved to UUIDs. `parent` (a `TEST-42`/UUID ref) creates a **sub-work-item**. |
 | `update_work_item(item, project, workspace?, …, parent?)` | Partial update; only supplied fields are sent. `parent` re-parents into a sub-work-item. |
 | `list_states(project, workspace?)` / `list_labels(project, workspace?)` | Discover valid state/label names. |
+| `link_work_items(item, related_item, relation_type, project, workspace?)` | Create a relation (needs the **DB** subsystem — relations aren't in the REST API). |
+| `unlink_work_items(item, related_item, relation_type, project, workspace?)` | Remove a relation. |
+
+**Work-item relations** are absent from CE's public REST API (like pages), so
+`link_work_items` / `unlink_work_items` write directly to Postgres and are gated
+on `DATABASE_URL` (not on the REST subsystem). `get_work_item` includes a
+`relations` list whenever the DB subsystem is enabled. `relation_type` is
+directional — "`item <relation_type> related_item`" — and accepts: `blocks`,
+`blocked_by`, `relates_to`, `duplicate`, `start_before`, `start_after`,
+`finish_before`, `finish_after`, `implements`, `implemented_by` (Plane stores the
+canonical direction; the inverse label is shown on the other item). Parent/child
+hierarchy is separate — use `parent` on create/update for sub-work-items.
 
 Content accepts **markdown** (default; CommonMark via `markdown-it-py`, with
 tables + strikethrough — a bullet list may follow a paragraph line without a
@@ -186,7 +200,7 @@ sequence (list projects → list states → resolve assignees → create) can br
 against it. A `429` surfaces as a clear rate-limit error naming the limit; the
 server does **not** silently retry in a loop.
 
-## Database role (pages)
+## Database role (pages + work-item relations)
 
 Create a dedicated, least-privilege role (do **not** run as the Plane superuser):
 
@@ -194,17 +208,21 @@ Create a dedicated, least-privilege role (do **not** run as the Plane superuser)
 CREATE ROLE plane_pages LOGIN PASSWORD '…';
 GRANT SELECT ON pages, project_pages, projects, workspaces TO plane_pages;
 GRANT INSERT, UPDATE ON pages, project_pages TO plane_pages;
--- no DELETE, no other tables
 GRANT SELECT ON users TO plane_pages;
+-- work-item relations (only if you use link_work_items / unlink_work_items):
+GRANT SELECT ON issues TO plane_pages;
+GRANT SELECT, INSERT, DELETE ON issue_relations TO plane_pages;
+-- no other tables
 ```
 
-Tool paths only ever read `pages`, `project_pages`, `projects`, `workspaces`
-(page owner is the configured `SERVICE_USER_ID`, not resolved from `users`, and
-work-item user/assignee resolution happens over REST, never the DB). The `users`
-table is read only by `verify`, to confirm `SERVICE_USER_ID`. `verify` runs a
-`SELECT` against **every** one of these tables, so a missing `GRANT` shows up as
-a clean `[FAIL] SELECT grant on '<table>'` (with the exact `GRANT` to run)
-rather than a runtime error later.
+Tool paths read `pages`, `project_pages`, `projects`, `workspaces` (page owner is
+the configured `SERVICE_USER_ID`, not resolved from `users`; work-item
+user/assignee resolution happens over REST, never the DB). `users` is read only
+by `verify`. **Relations** additionally read `issues` and read/write
+`issue_relations` — `DELETE` is needed because `unlink_work_items` hard-deletes
+the relation row. `verify` runs a `SELECT` against **every** one of these tables,
+so a missing `GRANT` shows up as a clean `[FAIL] SELECT grant on '<table>'` (with
+the exact `GRANT` to run) rather than a runtime error later.
 
 ## Post-upgrade ritual: `verify`
 
@@ -345,7 +363,8 @@ old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and co
 - **Non-goals:** page delete/archive, nested pages (`parent`), image/asset upload
   in content, workspace-global page creation (`is_global`), the internal
   session-auth app API; and for work items: delete, cycle/module membership,
-  attachments, comments, intake. (Sub-work-items **are** supported via `parent`.)
+  attachments, comments, intake. (Sub-work-items **are** supported via `parent`,
+  and work-item **relations** via `link_work_items`/`unlink_work_items`.)
 
 ## Development
 
