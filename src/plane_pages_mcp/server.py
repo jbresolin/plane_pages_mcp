@@ -7,9 +7,10 @@ A missing PAT never breaks pages and a missing DB never breaks work items;
 degraded capability is logged at startup and reported by ``verify``.
 
 Transport:
-  * http  — streamable HTTP on 0.0.0.0:8300/mcp, every request must carry a
-            matching ``Authorization: Bearer <MCP_AUTH_TOKEN>`` header.
-  * stdio — for local dev (Claude Code, etc.); no network auth.
+  * http  — streamable HTTP on 0.0.0.0:8300/mcp, protected by GitHub OAuth
+            (FastMCP GitHubProvider) + a GitHub-login allowlist. Unauthenticated
+            requests get a spec-shaped 401 with a WWW-Authenticate header.
+  * stdio — for on-box use (docker exec, Claude Code); no network auth.
 """
 
 from __future__ import annotations
@@ -18,12 +19,10 @@ import logging
 
 import uvicorn
 from fastmcp import FastMCP
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import PlainTextResponse
 
-from . import convert, pipeline, workitems
+from . import auth, convert, pipeline, workitems
 from .config import Config
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
@@ -75,12 +74,17 @@ class AppState:
             self.rest.close()
 
 
-def build_mcp(state: AppState) -> FastMCP:
-    mcp = FastMCP("plane_pages_mcp")
+def build_mcp(state: AppState, auth_provider=None) -> FastMCP:
+    mcp = FastMCP("plane_pages_mcp", auth=auth_provider)
     if state.db is not None:
         _register_page_tools(mcp, state)
     if state.rest is not None:
         _register_work_item_tools(mcp, state)
+
+    # Identity allowlist gate (http/OAuth only). GitHubProvider proves *who* the
+    # caller is; this decides *whether* they're allowed — applied globally.
+    if auth_provider is not None:
+        mcp.add_middleware(auth.AllowlistMiddleware(state.cfg.allowed_github_logins))
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(_request: Request) -> PlainTextResponse:
@@ -442,26 +446,15 @@ def _error(message: str) -> dict:
     return {"error": message}
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Reject any request whose Bearer token doesn't match. /healthz is open."""
-
-    def __init__(self, app, token: str) -> None:
-        super().__init__(app)
-        self._expected = f"Bearer {token}"
-
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/healthz":
-            return await call_next(request)
-        header = request.headers.get("authorization", "")
-        if header != self._expected:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
-
-
 def _capability_line(cfg: Config) -> str:
     pages = "on" if cfg.pages_enabled else "OFF (no DATABASE_URL)"
     rest = "on" if cfg.rest_enabled else "OFF (no PLANE_BASE_URL/PLANE_API_KEY)"
-    return f"capabilities: pages={pages}, work_items={rest}"
+    auth_str = (
+        f"github-oauth ({len(cfg.allowed_github_logins)} allowed logins)"
+        if cfg.auth_enabled
+        else "none (stdio)"
+    )
+    return f"capabilities: pages={pages}, work_items={rest}, auth={auth_str}"
 
 
 def run(cfg: Config) -> None:
@@ -470,10 +463,11 @@ def run(cfg: Config) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     state = AppState(cfg)
-    mcp = build_mcp(state)
-    log.info(_capability_line(cfg))
 
     if cfg.transport == "stdio":
+        # Auth-free on-box transport; FastMCP skips auth checks over stdio.
+        mcp = build_mcp(state)
+        log.info(_capability_line(cfg))
         log.info("starting plane_pages_mcp on stdio")
         try:
             mcp.run(transport="stdio")
@@ -481,9 +475,15 @@ def run(cfg: Config) -> None:
             state.close()
         return
 
-    middleware = [Middleware(BearerAuthMiddleware, token=cfg.mcp_auth_token)]
-    app = mcp.http_app(path=cfg.mcp_path, middleware=middleware)
-    log.info("starting plane_pages_mcp on http://%s:%s%s", cfg.host, cfg.port, cfg.mcp_path)
+    # http: GitHub OAuth + identity allowlist. FastMCP installs the auth ASGI
+    # middleware (spec-shaped 401 + WWW-Authenticate, discovery routes); our
+    # AllowlistMiddleware gates tool list/call by GitHub login.
+    auth_provider = auth.build_auth(cfg)
+    mcp = build_mcp(state, auth_provider=auth_provider)
+    log.info(_capability_line(cfg))
+    app = mcp.http_app(path=cfg.mcp_path)
+    log.info("starting plane_pages_mcp on http://%s:%s%s (public: %s)",
+             cfg.host, cfg.port, cfg.mcp_path, cfg.public_base_url)
     try:
         uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=cfg.log_level.lower())
     finally:

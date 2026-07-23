@@ -16,7 +16,19 @@
       "Bash(curl -LsSf https://astral.sh/uv/install.sh)",
       "Bash(sh)",
       "Read(//home/joaob/.local/bin/**)",
-      "Bash(.venv/bin/python -)"
+      "Bash(.venv/bin/python -)",
+      "Bash(export PGPASSWORD=plane)",
+      "Bash(psql -h localhost -U plane -d plane -q)",
+      "Bash(echo \"role cleanup exit=$?\")",
+      "Bash(psql -h localhost -U plane -d plane -tAc \"SELECT count\\(*\\) FROM pg_roles WHERE rolname='pp_verify_test';\")",
+      "Bash(docker run *)",
+      "Bash(curl -s -o /dev/null -w \"healthz=%{http_code}\\\\n\" --max-time 3 http://localhost:8388/healthz)",
+      "Bash(pkill -f \"plane_pages_mcp serve\")",
+      "Bash(pkill -f \"plane-pages-mcp serve\")",
+      "Bash(docker rm *)",
+      "Bash(curl -s -o /dev/null --max-time 2 http://localhost:8388/healthz)",
+      "Bash(kill 1119450)",
+      "Bash(pkill -9 -f \"plane-pages-mcp serve\")"
     ]
   }
 }

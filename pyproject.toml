@@ -5,13 +5,18 @@ description = "MCP server exposing read/write access to Plane CE Pages (absent f
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=3.0",
+    # Pinned to the current 3.x line: recent releases hardened the OAuth-proxy
+    # consent/redirect/cache machinery this server depends on. <4 avoids the
+    # 4.0 pre-release.
+    "fastmcp>=3.4.4,<4",
     "psycopg[binary,pool]>=3.2",
     "httpx>=0.27",
     "markdown-it-py>=3.0",
     "markdownify>=0.13",
     "beautifulsoup4>=4.12",
     "uvicorn>=0.30",
+    # OAuth client storage: encrypted-at-rest Redis backend for FastMCP.
+    "py-key-value-aio[redis]>=0.4",
 ]
 
 [project.optional-dependencies]

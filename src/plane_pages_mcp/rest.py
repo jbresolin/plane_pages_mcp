@@ -29,7 +29,18 @@ class RestNotFound(RestError):
     """A named/looked-up resource does not exist (surfaced with valid options)."""
 
 
+class RestForbidden(RestError):
+    """HTTP 403 — usually the service user isn't a member of the target project."""
+
+
 PRIORITIES = ("urgent", "high", "medium", "low", "none")
+
+# Appended to 403 errors: workspace-level calls can succeed while every
+# project-scoped call 403s when the PAT's user isn't a project member.
+FORBIDDEN_HINT = (
+    "service user may not be a member of this project "
+    "(workspace-level endpoints can still return 200)"
+)
 
 
 def _is_uuid(value: str) -> bool:
@@ -67,6 +78,8 @@ class PlaneREST:
             )
         if resp.status_code == 404:
             raise RestNotFound(f"{method} {url} -> 404 Not Found")
+        if resp.status_code == 403:
+            raise RestForbidden(f"{method} {url} -> 403 Forbidden. {FORBIDDEN_HINT}.")
         if not (200 <= resp.status_code < 300):
             raise RestError(
                 f"{method} {url} -> {resp.status_code}: {resp.text[:400]}"

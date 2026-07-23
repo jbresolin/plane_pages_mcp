@@ -15,7 +15,6 @@ from . import convert
 from .rest import (
     PRIORITIES,
     PlaneREST,
-    RestNotFound,
     member_display_map,
     resolve_member,
     resolve_named,
