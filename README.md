@@ -95,6 +95,10 @@ configured id — simpler, and attribution stays accurate.
 | `create_work_item(project, title, workspace, description?, state_name?, priority?, assignees?, labels?, parent?)` | **`workspace` required**; human names resolved to UUIDs. `parent` (a `TEST-42`/UUID ref) creates a **sub-work-item**. |
 | `update_work_item(item, project, workspace?, …, parent?)` | Partial update; only supplied fields are sent. `parent` re-parents into a sub-work-item. |
 | `list_states(project, workspace?)` / `list_labels(project, workspace?)` | Discover valid state/label names. |
+| `list_comments(item, project, workspace?)` | Comments with body as markdown, `actor` as a name, `edited` flag. |
+| `add_comment(item, body, project, workspace?, format="markdown")` | Add a comment (markdown or HTML). |
+| `update_comment(item, comment_id, body, project, workspace?, format="markdown")` | Edit a comment (`comment_id` from `list_comments`). |
+| `delete_comment(item, comment_id, project, workspace?)` | Delete a comment. |
 | `link_work_items(item, related_item, relation_type, project, workspace?)` | Create a relation (needs the **DB** subsystem — relations aren't in the REST API). |
 | `unlink_work_items(item, related_item, relation_type, project, workspace?)` | Remove a relation. |
 | `list_cycles(project, workspace?)` / `list_modules(project, workspace?)` | id, name, dates, issue counts (modules also `status`). |
@@ -107,6 +111,10 @@ configured id — simpler, and attribution stays accurate.
 issue assignment via the `cycle-issues`/`module-issues` sub-resources), so these
 tools are pure-REST — no DB. `end_date` maps to a module's target date; cycle/
 module resolution accepts a name or UUID.
+
+**Comments** are pure-REST too: content is sent as `comment_html` (markdown is
+converted for you) and read back as markdown, with the `actor` resolved to a
+display name. Comments are addressed by their UUID (from `list_comments`).
 
 **Work-item relations** are absent from CE's public REST API (like pages), so
 `link_work_items` / `unlink_work_items` write directly to Postgres and are gated
@@ -372,10 +380,11 @@ old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and co
   `page_versions` entries. Cosmetic, but be aware.
 - **Non-goals:** page delete/archive, nested pages (`parent`), image/asset upload
   in content, workspace-global page creation (`is_global`), the internal
-  session-auth app API; and for work items: delete, attachments, comments,
-  intake. (Sub-work-items **are** supported via `parent`, work-item **relations**
-  via `link_work_items`/`unlink_work_items`, and **cycles/modules** — CRUD +
-  issue assignment — via the `*_cycle`/`*_module` tools.)
+  session-auth app API; and for work items: delete, attachments, intake.
+  (Sub-work-items **are** supported via `parent`, work-item **relations** via
+  `link_work_items`/`unlink_work_items`, **cycles/modules** — CRUD + issue
+  assignment — via the `*_cycle`/`*_module` tools, and **comments** — CRUD — via
+  the `*_comment` tools.)
 
 ## Development
 

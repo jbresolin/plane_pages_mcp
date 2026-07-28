@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from . import auth, containers, convert, pipeline, relations, workitems
+from . import auth, comments, containers, convert, pipeline, relations, workitems
 from .config import Config
 from .containers import ContainerError
 from .db import Database, NotFoundError
@@ -442,6 +442,74 @@ def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
         """
         try:
             return workitems.list_labels(rest, _slug(workspace), project)
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    # --- comments ---
+
+    @mcp.tool
+    def list_comments(item: str, project: str, workspace: str | None = None) -> dict:
+        """List a work item's comments (REST), body as markdown, actor as a name.
+
+        Args:
+            item: sequence ref ("TEST-42") or issue UUID.
+            project: project identifier or UUID.
+            workspace: workspace slug (default WORKSPACE_SLUG).
+        """
+        try:
+            return comments.list_comments(rest, _slug(workspace), project, item)
+        except (RestError, WorkItemError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def add_comment(
+        item: str,
+        body: str,
+        project: str,
+        workspace: str | None = None,
+        format: str = "markdown",
+    ) -> dict:
+        """Add a comment to a work item (REST).
+
+        Args:
+            item: sequence ref ("TEST-42") or issue UUID.
+            body: comment text — markdown (default) or HTML (see `format`).
+            project: project identifier or UUID.
+            workspace: workspace slug (default WORKSPACE_SLUG).
+            format: "markdown" or "html".
+        """
+        try:
+            return comments.add_comment(rest, _slug(workspace), project, item, body=body, fmt=format)
+        except (RestError, WorkItemError, WorkspaceUnset, convert.ContentError) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def update_comment(
+        item: str,
+        comment_id: str,
+        body: str,
+        project: str,
+        workspace: str | None = None,
+        format: str = "markdown",
+    ) -> dict:
+        """Edit a comment (REST). `comment_id` is the UUID from list_comments.
+
+        `body` replaces the comment; markdown (default) or HTML via `format`.
+        """
+        try:
+            return comments.update_comment(
+                rest, _slug(workspace), project, item, comment_id, body=body, fmt=format
+            )
+        except (RestError, WorkItemError, WorkspaceUnset, convert.ContentError) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def delete_comment(
+        item: str, comment_id: str, project: str, workspace: str | None = None
+    ) -> dict:
+        """Delete a comment (REST). `comment_id` is the UUID from list_comments."""
+        try:
+            return comments.delete_comment(rest, _slug(workspace), project, item, comment_id)
         except (RestError, WorkItemError, WorkspaceUnset) as exc:
             return _error(str(exc))
 

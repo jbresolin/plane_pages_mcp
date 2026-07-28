@@ -155,6 +155,38 @@ class PlaneREST:
             json=payload,
         )
 
+    # --- issue comments -------------------------------------------------
+    #
+    # Content is `comment_html`; Plane populates the other representations
+    # itself (same as issue descriptions). Comments are identified by UUID.
+
+    def _comments_base(self, slug: str, project_id: str, issue_id: str) -> str:
+        return f"workspaces/{slug}/projects/{project_id}/issues/{issue_id}/comments"
+
+    def list_comments(self, slug: str, project_id: str, issue_id: str) -> list[dict]:
+        return self._paginated(f"{self._comments_base(slug, project_id, issue_id)}/")
+
+    def create_comment(self, slug: str, project_id: str, issue_id: str, payload: dict) -> dict:
+        return self._request(
+            "POST", f"{self._comments_base(slug, project_id, issue_id)}/", json=payload
+        )
+
+    def update_comment(
+        self, slug: str, project_id: str, issue_id: str, comment_id: str, payload: dict
+    ) -> dict:
+        return self._request(
+            "PATCH",
+            f"{self._comments_base(slug, project_id, issue_id)}/{comment_id}/",
+            json=payload,
+        )
+
+    def delete_comment(
+        self, slug: str, project_id: str, issue_id: str, comment_id: str
+    ) -> None:
+        return self._request(
+            "DELETE", f"{self._comments_base(slug, project_id, issue_id)}/{comment_id}/"
+        )
+
     # --- lookups (states / labels / members) ---------------------------
 
     def list_states(self, slug: str, project_id: str) -> list[dict]:
