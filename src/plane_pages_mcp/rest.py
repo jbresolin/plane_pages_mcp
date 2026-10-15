@@ -6,15 +6,26 @@ populates the other representations itself.
 
 Auth: header ``x-api-key: <PAT>``. Base URL is the instance site root; the
 client appends ``/api/v1``. Rate limiting (API_KEY_RATE_LIMIT, default
-60/minute) surfaces 429 as a clear error — never a silent retry loop.
+60/minute): on HTTP 429, requests that are safe to repeat are retried a few
+times within a bounded wait, honouring Retry-After (ratelimit.py), and every
+retry is logged. Creates and partial updates are never retried. When the
+budget runs out, a clear RateLimitError is raised.
 """
 
 from __future__ import annotations
 
+import logging
+import random
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import httpx
+
+from . import ratelimit
+
+log = logging.getLogger("plane_pages_mcp")
 
 
 class RestError(RuntimeError):
@@ -56,12 +67,26 @@ def _is_uuid(value: str) -> bool:
 
 
 class PlaneREST:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 30.0,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        rand: Callable[[], float] = random.random,
+    ) -> None:
+        """``transport``, ``sleep`` and ``rand`` exist for tests: a fake HTTP
+        layer, and a clock/random source that don't really wait."""
         self._base = base_url.rstrip("/") + "/api/v1"
         self._client = httpx.Client(
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
             timeout=timeout,
+            transport=transport,
         )
+        self._sleep = sleep
+        self._rand = rand
 
     def close(self) -> None:
         self._client.close()
@@ -70,16 +95,7 @@ class PlaneREST:
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self._base}/{path.lstrip('/')}"
-        try:
-            resp = self._client.request(method, url, **kwargs)
-        except httpx.HTTPError as exc:
-            raise RestError(f"{method} {url} failed: {exc}") from exc
-
-        if resp.status_code == 429:
-            raise RateLimitError(
-                "Plane REST rate limit hit (HTTP 429; instance API_KEY_RATE_LIMIT, "
-                "default 60/minute). Slow down and retry — not retrying automatically."
-            )
+        resp = self._send_with_rate_limit_retry(method, path, url, **kwargs)
         if resp.status_code == 404:
             raise RestNotFound(f"{method} {url} -> 404 Not Found")
         if resp.status_code == 403:
@@ -93,6 +109,35 @@ class PlaneREST:
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    def _send_with_rate_limit_retry(self, method: str, path: str, url: str, **kwargs):
+        """Send; on 429, wait and resend while ratelimit.next_wait allows it."""
+        retries, waited = 0, 0.0
+        while True:
+            try:
+                resp = self._client.request(method, url, **kwargs)
+            except httpx.HTTPError as exc:
+                raise RestError(f"{method} {url} failed: {exc}") from exc
+            if resp.status_code != 429:
+                return resp
+
+            retry_after = ratelimit.retry_after_seconds(
+                resp.headers.get("Retry-After"), now=time.time()
+            )
+            wait, reason = ratelimit.next_wait(method, retries, waited, retry_after, self._rand)
+            if wait is None:
+                raise RateLimitError(
+                    "Plane REST rate limit hit (HTTP 429; instance API_KEY_RATE_LIMIT, "
+                    f"default 60/minute). Slow down and retry: {reason}."
+                )
+            retries += 1
+            waited += wait
+            log.warning(
+                "Plane REST 429 on %s %s: retry %d/%d in %.1f s (%s)",
+                method, path, retries, ratelimit.MAX_RETRIES, wait,
+                "Retry-After" if retry_after is not None else "backoff with jitter",
+            )
+            self._sleep(wait)
 
     def get(self, path: str, **kwargs) -> Any:
         return self._request("GET", path, **kwargs)

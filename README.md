@@ -239,8 +239,18 @@ enough — the server only needs your identity, not repo access.
 
 The instance sets `API_KEY_RATE_LIMIT` (default `60/minute`). A chained work-item
 sequence (list projects → list states → resolve assignees → create) can brush
-against it. A `429` surfaces as a clear rate-limit error naming the limit; the
-server does **not** silently retry in a loop.
+against it, and a batch of reads (listing a dozen projects) used to fail halfway.
+
+On a `429`, requests that are **safe to repeat** (GET, HEAD, OPTIONS, PUT,
+DELETE) are retried **up to 3 times**, waiting what Plane's `Retry-After`
+says (or 1/2/4 s with jitter if it sends none), with **at most 65 s of
+waiting** per request. After a burst Plane asks for about 57 s, because
+nothing frees up until the oldest request in the 60 s window expires. Every
+retry is logged as a warning (`Plane REST 429 on GET …: retry 1/3 in 57.0 s`).
+**Creates and partial updates (POST, PATCH) are never retried**, because
+repeating one could make a duplicate. When the budget runs out, the usual
+clear rate-limit error is raised, saying why it stopped. While a retry is
+waiting, the tool call blocks, for up to about a minute.
 
 ## Database role (pages + work-item relations)
 
