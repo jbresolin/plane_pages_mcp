@@ -33,6 +33,10 @@ class RestForbidden(RestError):
     """HTTP 403 — usually the service user isn't a member of the target project."""
 
 
+class RestConflict(RestError):
+    """HTTP 409 — something with that name/identifier already exists."""
+
+
 PRIORITIES = ("urgent", "high", "medium", "low", "none")
 
 # Appended to 403 errors: workspace-level calls can succeed while every
@@ -80,6 +84,8 @@ class PlaneREST:
             raise RestNotFound(f"{method} {url} -> 404 Not Found")
         if resp.status_code == 403:
             raise RestForbidden(f"{method} {url} -> 403 Forbidden. {FORBIDDEN_HINT}.")
+        if resp.status_code == 409:
+            raise RestConflict(f"{method} {url} -> 409: {resp.text[:400]}")
         if not (200 <= resp.status_code < 300):
             raise RestError(
                 f"{method} {url} -> {resp.status_code}: {resp.text[:400]}"
@@ -112,6 +118,23 @@ class PlaneREST:
 
     def list_projects(self, slug: str) -> list[dict]:
         return self._paginated(f"workspaces/{slug}/projects/")
+
+    def create_project(self, slug: str, payload: dict) -> dict:
+        return self._request("POST", f"workspaces/{slug}/projects/", json=payload)
+
+    def get_me(self) -> dict:
+        """The user this API key belongs to (the MCP's service user)."""
+        return self.get("users/me/")
+
+    def list_workspace_members(self, slug: str) -> list[dict]:
+        """id, email, display_name, role (20 Admin / 15 Member / 5 Guest)."""
+        return self._paginated(f"workspaces/{slug}/members/")
+
+    def add_project_member(self, slug: str, project_id: str, member_id: str, role: int) -> dict:
+        return self._request(
+            "POST", f"workspaces/{slug}/projects/{project_id}/members/",
+            json={"member": member_id, "role": role},
+        )
 
     def resolve_project(self, slug: str, project_ref: str) -> dict:
         for p in self.list_projects(slug):

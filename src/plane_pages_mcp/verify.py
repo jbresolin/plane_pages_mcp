@@ -264,6 +264,25 @@ def _verify_pages(cfg: Config, report: _Report) -> None:
         report.check(False, f"POST {cfg.live_convert_url}", str(exc))
 
     _verify_presence(cfg, report)
+    _verify_project_visibility_grant(cfg, report)
+
+
+def _verify_project_visibility_grant(cfg: Config, report: _Report) -> None:
+    """create_project makes projects private with a one-column DB write."""
+    from .db import PROJECT_NETWORK_GRANT, PROJECT_NETWORK_GRANT_SQL
+
+    def has_grant() -> bool:
+        with psycopg.connect(cfg.database_url) as conn:
+            return bool(conn.execute(PROJECT_NETWORK_GRANT_SQL).fetchone()[0])
+
+    granted = _guard(report, "UPDATE grant on projects(network, updated_at)", has_grant)
+    if granted is not _FAILED:
+        report.check(
+            granted, "UPDATE grant on projects(network, updated_at) (private projects)",
+            "" if granted else
+            "create_project will refuse visibility=\"private\" — grant with: "
+            + PROJECT_NETWORK_GRANT,
+        )
 
 
 def _verify_presence(cfg: Config, report: _Report) -> None:

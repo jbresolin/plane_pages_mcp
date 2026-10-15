@@ -42,6 +42,9 @@ class Config:
     # rest subsystem
     plane_base_url: str | None
     plane_api_key: str | None
+    # Email of the person create_project adds as project Admin when no lead
+    # is given (otherwise only the service user would be a member).
+    default_project_lead: str | None
     # auth (http transport only)
     github_client_id: str | None
     github_client_secret: str | None
@@ -107,6 +110,7 @@ class Config:
             web_url=os.environ.get("PLANE_WEB_URL", "http://localhost").rstrip("/"),
             plane_base_url=plane_base_url,
             plane_api_key=plane_api_key,
+            default_project_lead=(os.environ.get("DEFAULT_PROJECT_LEAD") or "").strip() or None,
             github_client_id=os.environ.get("GITHUB_CLIENT_ID") or None,
             github_client_secret=os.environ.get("GITHUB_CLIENT_SECRET") or None,
             public_base_url=public_base_url,

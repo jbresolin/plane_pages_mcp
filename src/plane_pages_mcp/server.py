@@ -22,13 +22,15 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from . import auth, comments, containers, convert, pipeline, relations, workitems
+from . import auth, comments, containers, convert, members, pipeline, projects, relations, workitems
 from .config import Config
 from .containers import ContainerError
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
 from .presence import LivePresence
+from .members import MemberError
+from .projects import ProjectError
 from .relations import RelationError
 from .rest import PlaneREST, RestError
 from .workitems import WorkItemError
@@ -313,6 +315,62 @@ def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
         try:
             return workitems.list_projects(rest, _slug(workspace))
         except (RestError, WorkspaceUnset) as exc:
+            return _error(str(exc))
+
+    @mcp.tool
+    def create_project(
+        workspace: str,
+        name: str,
+        identifier: str,
+        description: str | None = None,
+        lead: str | None = None,
+        visibility: str = "private",
+    ) -> dict:
+        """Create a project (REST). Returns id, identifier, visibility, lead, notes.
+
+        Args:
+            workspace: workspace slug — REQUIRED (no default).
+            name: project name; may not contain & + , : ; $ ^ } { * = ? @ # | ' < > . ( ) % ! -
+            identifier: short key used in work-item ids (e.g. "HOME" -> HOME-12):
+                1-10 letters/digits, stored uppercase.
+            description: optional plain text.
+            lead: email or exact display name of a workspace Admin/Member, added
+                as project Admin so they can see the project. Defaults to the
+                server's DEFAULT_PROJECT_LEAD. Workspace Guests are refused.
+            visibility: "private" (default; only members see it) or "public".
+
+        Always read ``notes``: they say if the lead couldn't be added or the
+        project couldn't be made private, and how to fix it.
+        """
+        if not workspace:
+            return _error("workspace is required for create_project (no default is applied)")
+        try:
+            result = projects.create_project(
+                rest, workspace, name=name, identifier=identifier, description=description,
+                lead=lead, default_lead=state.cfg.default_project_lead,
+                visibility=visibility, db=state.db,
+            )
+        except (ProjectError, RestError) as exc:
+            return _error(str(exc))
+        log.info("created project %s in %s (%s)", result["identifier"], workspace,
+                 result["visibility"])
+        return result
+
+    @mcp.tool
+    def add_project_member(workspace: str, project: str, member: str, role: str) -> dict:
+        """Add a workspace Admin/Member to a project (REST).
+
+        Args:
+            workspace: workspace slug — REQUIRED.
+            project: project identifier or UUID.
+            member: email or exact display name of a workspace member.
+            role: "admin" or "member". Workspace Guests can't be added.
+        """
+        if not workspace:
+            return _error("workspace is required for add_project_member")
+        try:
+            return members.add_project_member(rest, workspace, project, member, role)
+        except (MemberError, RestError) as exc:
             return _error(str(exc))
 
     @mcp.tool

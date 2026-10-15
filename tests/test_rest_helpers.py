@@ -48,3 +48,23 @@ def test_resolve_member_unknown_lists_options():
     with pytest.raises(rest.RestNotFound) as exc:
         rest.resolve_member(members, "Zoe")
     assert "Alice" in str(exc.value)
+
+
+def test_http_409_becomes_rest_conflict():
+    # Checks: when Plane answers HTTP 409, the REST client raises
+    # RestConflict (a kind of RestError) carrying Plane's response body.
+    # Why: create_project relies on this exact error type to turn Plane's
+    # ambiguous "name is already taken" into a clear message. The other
+    # tests fake it directly, so this one checks the real HTTP path, using
+    # httpx's built-in mock transport instead of a server.
+    import httpx
+
+    from plane_pages_mcp.rest import PlaneREST, RestConflict
+
+    def plane(request):
+        return httpx.Response(409, json={"name": "The project name is already taken"})
+
+    rest = PlaneREST("http://plane.test", "key")
+    rest._client = httpx.Client(transport=httpx.MockTransport(plane))
+    with pytest.raises(RestConflict, match="already taken"):
+        rest.create_project("ws", {"name": "x", "identifier": "X"})

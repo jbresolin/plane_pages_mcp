@@ -157,3 +157,18 @@ def test_live_redis_url_is_none_without_any_redis(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
     monkeypatch.setenv("SERVICE_USER_ID", "u")
     assert Config.from_env().live_redis_url is None
+
+
+def test_default_project_lead_is_read_from_the_environment(monkeypatch):
+    # Checks: DEFAULT_PROJECT_LEAD is read (spaces trimmed), and is None when
+    # unset or blank.
+    # Why: create_project falls back to it when no lead is given. A blank
+    # value must mean "no default", not a lookup of an empty name.
+    monkeypatch.setenv("PLANE_BASE_URL", "http://host")
+    monkeypatch.setenv("PLANE_API_KEY", "pat")
+    monkeypatch.setenv("DEFAULT_PROJECT_LEAD", " me@example.com ")
+    assert Config.from_env().default_project_lead == "me@example.com"
+    monkeypatch.setenv("DEFAULT_PROJECT_LEAD", "  ")
+    assert Config.from_env().default_project_lead is None
+    monkeypatch.delenv("DEFAULT_PROJECT_LEAD")
+    assert Config.from_env().default_project_lead is None

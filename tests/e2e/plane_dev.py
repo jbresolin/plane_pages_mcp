@@ -69,14 +69,57 @@ print("SESSION=" + store.session_key)
 """
 
 
-def mint_session(config: HarnessConfig) -> str:
-    """Return a Plane ``session-id`` cookie value for the browser user."""
-    if config.session_id:
+# Run inside the Plane api container: create (once) a user with a fixed email
+# and make them a member of the workspace with the given role. Uses Plane's
+# own models, so the rows look exactly like ones the app creates.
+_ENSURE_USER_SNIPPET = """
+import uuid
+from plane.db.models import User, Workspace, WorkspaceMember
+user = User.objects.filter(email={email!r}).first()
+if user is None:
+    user = User(email={email!r}, username=uuid.uuid4().hex, display_name={display_name!r},
+                first_name={display_name!r}, is_password_autoset=True)
+    user.set_unusable_password()
+    user.save()
+workspace = Workspace.objects.get(slug={slug!r})
+membership = WorkspaceMember.objects.filter(workspace=workspace, member=user).first()
+if membership is None:
+    WorkspaceMember.objects.create(workspace=workspace, member=user, role={role})
+elif membership.role != {role} or not membership.is_active:
+    membership.role = {role}
+    membership.is_active = True
+    membership.save()
+print("USER=" + str(user.id))
+"""
+
+
+def ensure_workspace_user(config: HarnessConfig, email: str, display_name: str, role: int) -> str:
+    """Make sure a dev-only user exists in the harness workspace; return its id.
+
+    Dev stack only: used to have a plain Member and a Guest to test project
+    membership and visibility against. Safe to run repeatedly.
+    """
+    snippet = _ENSURE_USER_SNIPPET.format(
+        email=email, display_name=display_name, slug=config.workspace_slug, role=role
+    )
+    result = subprocess.run(
+        ["docker", "exec", config.api_container, "python", "manage.py", "shell", "-c", snippet],
+        capture_output=True, text=True, timeout=120, check=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("USER="):
+            return line.removeprefix("USER=")
+    raise RuntimeError(f"could not create {email}; api container said: {result.stderr[-500:]}")
+
+
+def mint_session(config: HarnessConfig, email: str | None = None) -> str:
+    """Return a Plane ``session-id`` cookie value for ``email`` (default: browser user)."""
+    if config.session_id and email is None:
         return config.session_id
     result = subprocess.run(
         [
             "docker", "exec", config.api_container, "python", "manage.py", "shell",
-            "-c", _MINT_SESSION_SNIPPET.format(email=config.browser_user_email),
+            "-c", _MINT_SESSION_SNIPPET.format(email=email or config.browser_user_email),
         ],
         capture_output=True, text=True, timeout=120, check=True,
     )

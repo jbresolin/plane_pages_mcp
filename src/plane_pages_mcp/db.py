@@ -58,6 +58,16 @@ ISSUE_RELATIONS_INSERT_COLUMNS = frozenset(
 )
 
 
+# Can the current role make a project private (Database.set_project_network)?
+# Shared by create_project's up-front check and by `verify`, so both always
+# ask exactly the same question.
+PROJECT_NETWORK_GRANT_SQL = (
+    "SELECT has_column_privilege(current_user, 'projects', 'network', 'UPDATE') "
+    "AND has_column_privilege(current_user, 'projects', 'updated_at', 'UPDATE') AS allowed"
+)
+PROJECT_NETWORK_GRANT = "GRANT UPDATE (network, updated_at) ON projects TO <role>"
+
+
 class DuplicateRelationError(RuntimeError):
     """A relation already exists between these two work items in this direction."""
 
@@ -480,6 +490,27 @@ class Database:
                 """,
                 (issue_id, issue_id),
             ).fetchall()
+
+    def can_set_project_network(self) -> bool:
+        """True if this role holds the grant set_project_network needs."""
+        with self._conn() as conn:
+            # This pool returns rows as dicts, hence the column name.
+            return bool(conn.execute(PROJECT_NETWORK_GRANT_SQL).fetchone()["allowed"])
+
+    def set_project_network(self, project_id: str, network: int) -> int:
+        """Set a project's visibility (0 private, 2 public); returns rows updated.
+
+        Plane v1.3.1's REST API ignores ``network`` on create and update, so
+        create_project makes a project private with this one-column write.
+        Needs ``GRANT UPDATE (network, updated_at) ON projects``.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE projects SET network = %s, updated_at = now() "
+                "WHERE id = %s AND deleted_at IS NULL",
+                (network, project_id),
+            )
+            return cur.rowcount
 
     @contextmanager
     def transaction(self) -> Iterator[psycopg.Connection]:
