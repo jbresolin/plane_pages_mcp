@@ -17,6 +17,12 @@ dependencies = [
     "uvicorn>=0.30",
     # OAuth client storage: encrypted-at-rest Redis backend for FastMCP.
     "py-key-value-aio[redis]>=0.4",
+    # Asking Plane's live server whether a page is open (presence.py). Also
+    # pulled in by the line above; listed because we import it directly.
+    "redis>=5",
+    # Yjs (Rust "yrs" bindings): page updates continue the page's existing
+    # Yjs history (yjs_state.py). 0.x API, so held to the tested minor.
+    "pycrdt>=0.14,<0.15",
 ]
 
 [project.optional-dependencies]

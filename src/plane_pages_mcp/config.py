@@ -50,6 +50,9 @@ class Config:
     jwt_signing_key: str | None
     storage_encryption_key: str | None
     redis_url: str | None
+    # Plane's Redis, used to ask the live server whether a page is open
+    # (presence.py). Defaults to redis_url: pub/sub ignores the DB number.
+    live_redis_url: str | None
     token_expiry_seconds: int
     # shared
     workspace_slug: str | None  # a DEFAULT, not a fixture
@@ -111,6 +114,9 @@ class Config:
             jwt_signing_key=os.environ.get("JWT_SIGNING_KEY") or None,
             storage_encryption_key=os.environ.get("STORAGE_ENCRYPTION_KEY") or None,
             redis_url=os.environ.get("REDIS_URL") or None,
+            live_redis_url=(
+                os.environ.get("PLANE_LIVE_REDIS_URL") or os.environ.get("REDIS_URL") or None
+            ),
             token_expiry_seconds=int(os.environ.get("TOKEN_EXPIRY_SECONDS", "604800")),
             workspace_slug=os.environ.get("WORKSPACE_SLUG") or None,
             transport=transport,

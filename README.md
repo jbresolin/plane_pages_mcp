@@ -46,6 +46,22 @@ in the editor and get clobbered by the live server. So **every write sets all
 four together**, deriving json + binary from the `live` service's
 `convert-document` endpoint (the same converter Plane uses internally).
 
+The editor also keeps **its own copies** of a page outside the database, and
+`update_page` has to respect both:
+
+- **Browsers cache the Yjs document** (IndexedDB) after a visit. The converter
+  returns a brand-new Yjs document with no relation to the page's history, so
+  storing it as is made a returning browser merge old + new content and save
+  that mix back. `update_page` therefore stores the new content **as a
+  continuation of the page's existing Yjs history** (delete the old content,
+  add the new), so cached copies converge on the new content (`yjs_state.py`).
+- **While a page is open**, the live server holds it in memory and its copy
+  overwrites the database on its next save. `update_page` **asks the live
+  server first** (a Hocuspocus "who is here?" query over Plane's Redis,
+  `presence.py`) and refuses with a clear error while the page is open. Close
+  the page and retry. If the check can't run (Redis unreachable), the update
+  is refused too, rather than risking a silent loss.
+
 Work-item descriptions have the same multi-representation issue, but the **REST
 API handles it itself**: we send `description_html` and Plane fills the rest.
 The pages DB-write path is never reused for work items.
@@ -83,7 +99,7 @@ configured id — simpler, and attribution stays accurate.
 | `search_pages(query, workspace?, limit=20)` | Case-insensitive name+body match within one workspace; ±120-char snippet. |
 | `read_page(page_id, format="markdown")` | Metadata + content (markdown/html) + owning workspace slug. |
 | `create_page(title, content, project, workspace, format="markdown", access="public")` | Create a page — **`workspace` required**; returns id + UI URL. |
-| `update_page(page_id, content, format="markdown", title?, mode="replace")` | Replace or `append` body (inherits the page's workspace). |
+| `update_page(page_id, content, format="markdown", title?, mode="replace")` | Replace or `append` body (inherits the page's workspace). **Refused while the page is open in the editor.** |
 
 ### Work items (REST) — enabled by `PLANE_BASE_URL` + `PLANE_API_KEY`
 
@@ -128,7 +144,11 @@ hierarchy is separate — use `parent` on create/update for sub-work-items.
 
 Content accepts **markdown** (default; CommonMark via `markdown-it-py`, with
 tables + strikethrough — a bullet list may follow a paragraph line without a
-blank line, matching GitHub) or raw **HTML** via `format="html"`. Priorities:
+blank line, matching GitHub) or raw **HTML** via `format="html"`. In markdown,
+tag-like text is **text**: `<box>`, `Record<string, X>` or a stray `<pre>` show
+up literally instead of being treated as HTML (use `format="html"` for real
+tags; `<https://…>` autolinks still work). Reading back escapes `|` in table
+cells so tables round-trip. Priorities:
 `urgent`/`high`/`medium`/`low`/`none`. Unknown state/label/assignee/priority/
 parent names return an error listing the valid options.
 
@@ -149,7 +169,8 @@ Set via environment (see [`.env.example`](.env.example)):
 | `PUBLIC_BASE_URL` | — | **http auth**; public origin, e.g. `https://planemcp.<domain>` (no `/mcp`) |
 | `ALLOWED_GITHUB_LOGINS` | — | **http auth**; comma-separated GitHub logins allowed (case-insensitive); empty is rejected |
 | `JWT_SIGNING_KEY` | — | **http auth**; long secret, stable across restarts (≥12 chars) |
-| `REDIS_URL` | — | **http auth**; OAuth state store, e.g. `redis://plane-redis:6379/0` |
+| `REDIS_URL` | — | **http auth**; OAuth state store, e.g. `redis://plane-redis:6379/1`. Must be **Plane's** Redis: it also serves the open-page check (below) |
+| `PLANE_LIVE_REDIS_URL` | `REDIS_URL` | pages; Plane's Redis for `update_page`'s open-page check. Only set it if `REDIS_URL` points elsewhere (pub/sub ignores the DB number). Unset both → the check is skipped with a startup warning |
 | `STORAGE_ENCRYPTION_KEY` | — | **http auth**; encrypts OAuth state at rest (Fernet) |
 | `TOKEN_EXPIRY_SECONDS` | `604800` | http auth; FastMCP access-token lifetime (7 days) |
 | `MCP_TRANSPORT` | `http` | `http` (streamable `0.0.0.0:8300/mcp`, GitHub OAuth) or `stdio` (on-box, auth-free) |
@@ -373,9 +394,10 @@ old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and co
 
 ## Caveats & non-goals
 
-- **Concurrency (last-writer-loses).** If a page is open in a browser, the live
-  server's in-memory Yjs doc wins on its next persist and can overwrite a tool
-  write. No Yjs merging is attempted — write to pages that aren't being edited.
+- **Pages open in the editor can't be updated.** `update_page` refuses while
+  a page is open (see "How pages work"). There is a sub-second window between
+  the check and the commit in which a newly opened tab could still load the
+  old state; that tab's copy would then win.
 - **No page version history.** Tool page-writes create no `PageLog`/
   `page_versions` entries. Cosmetic, but be aware.
 - **Non-goals:** page delete/archive, nested pages (`parent`), image/asset upload
@@ -391,8 +413,15 @@ old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and co
 ```bash
 uv pip install -e '.[dev]'
 pytest   # conversions, row shaping, column coverage, config capabilities,
-         # REST helpers, work-item shaping (fake REST), auth middleware
+         # REST helpers, work-item shaping (fake REST), auth middleware,
+         # Yjs rebase + open-page check (fakes)
 ```
+
+**Editor harness.** `tests/e2e` writes pages through this server's code and
+opens them in the real Plane web editor with headless Chromium (load, no
+freeze, no new console errors, content round-trips, stale-cache and open-page
+behaviour). Skipped unless `PLANE_E2E=1`; rerun it after every Plane upgrade.
+See [tests/e2e/README.md](tests/e2e/README.md).
 
 Integration testing runs against a real Plane instance using a throwaway project
 and disposable pages/items (take a `pg_dump` first for pages).

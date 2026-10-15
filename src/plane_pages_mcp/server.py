@@ -28,6 +28,7 @@ from .containers import ContainerError
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
+from .presence import LivePresence
 from .relations import RelationError
 from .rest import PlaneREST, RestError
 from .workitems import WorkItemError
@@ -46,10 +47,12 @@ class AppState:
         self.cfg = cfg
         self.db: Database | None = None
         self.live: LiveConverter | None = None
+        self.presence: LivePresence | None = None
         self.rest: PlaneREST | None = None
         if cfg.pages_enabled:
             self.db = Database(cfg.database_url)
             self.live = LiveConverter(cfg.live_convert_url)
+            self.presence = _build_presence(cfg)
         if cfg.rest_enabled:
             self.rest = PlaneREST(cfg.plane_base_url, cfg.plane_api_key)
 
@@ -74,6 +77,24 @@ class AppState:
             self.db.close()
         if self.rest:
             self.rest.close()
+
+
+def _build_presence(cfg: Config) -> LivePresence | None:
+    """The "is this page open?" check for update_page, if Redis is configured."""
+    if not cfg.live_redis_url:
+        log.warning(
+            "no REDIS_URL / PLANE_LIVE_REDIS_URL: update_page cannot tell whether a "
+            "page is open in the editor, and an update to an open page will be lost"
+        )
+        return None
+    import redis  # local import: only needed when pages + Redis are configured
+
+    # Short timeouts: this runs inside a tool call. A slow or dead Redis must
+    # fail the update quickly with a clear message, not hang it.
+    client = redis.Redis.from_url(
+        cfg.live_redis_url, socket_connect_timeout=3, socket_timeout=3
+    )
+    return LivePresence(client)
 
 
 def build_mcp(state: AppState, auth_provider=None) -> FastMCP:
@@ -248,6 +269,9 @@ def _register_page_tools(mcp: FastMCP, state: AppState) -> None:
             format: "markdown" or "html".
             title: new title, or omit to keep the current one.
             mode: "replace" (default) overwrites the body; "append" adds to it.
+
+        Refused while the page is open in the Plane editor (the editor's copy
+        would overwrite this change). Ask the person to close it, then retry.
         """
         try:
             result = pipeline.update_page(
@@ -259,6 +283,7 @@ def _register_page_tools(mcp: FastMCP, state: AppState) -> None:
                 title=title,
                 mode=mode,
                 service_user_id=state.cfg.service_user_id,
+                presence=state.presence,
             )
         except (WriteError, ConvertError, convert.ContentError) as exc:
             return _error(str(exc))

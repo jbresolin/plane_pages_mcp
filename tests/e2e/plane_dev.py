@@ -31,6 +31,7 @@ class HarnessConfig:
     session_id: str | None
     api_container: str
     chromium_path: str | None
+    redis_url: str
 
     @classmethod
     def from_env(cls) -> "HarnessConfig":
@@ -45,6 +46,9 @@ class HarnessConfig:
             session_id=env("PLANE_E2E_SESSION_ID"),
             api_container=env("PLANE_E2E_API_CONTAINER", "plane-dev-api-1"),
             chromium_path=env("PLANE_E2E_CHROMIUM"),
+            # Plane's Redis, for the open-page check. The stock compose file
+            # doesn't publish it; see README for exposing it on 6380.
+            redis_url=env("PLANE_E2E_REDIS_URL", "redis://localhost:6380/0"),
         )
 
 

@@ -205,18 +205,30 @@ class Database:
             ).fetchone()
         return row
 
-    def get_page_html(self, conn: psycopg.Connection, page_id: str) -> str | None:
+    def get_page_content(self, conn: psycopg.Connection, page_id: str) -> dict[str, Any] | None:
+        """Lock the page row and return {html, binary} (binary may be None).
+
+        The binary is the page's current Yjs state; update_page builds the new
+        state on top of it (see yjs_state.py). The row lock keeps a concurrent
+        writer from slipping in between that read and our write.
+        """
         # No workspace filter: update_page targets a globally-unique page id and
         # inherits that page's workspace.
         row = conn.execute(
             """
-            SELECT description_html FROM pages
+            SELECT description_html, description_binary FROM pages
             WHERE id = %s AND deleted_at IS NULL
             FOR UPDATE
             """,
             (page_id,),
         ).fetchone()
-        return None if row is None else (row["description_html"] or "")
+        if row is None:
+            return None
+        binary = row["description_binary"]
+        return {
+            "html": row["description_html"] or "",
+            "binary": bytes(binary) if binary is not None else None,
+        }
 
     # --- writes (called within a transaction by pipeline.py) ------------
 

@@ -86,6 +86,15 @@ def app_client(config, session_id):
 
 
 @pytest.fixture(scope="session")
+def presence(config):
+    import redis
+
+    from plane_pages_mcp.presence import LivePresence
+
+    return LivePresence(redis.Redis.from_url(config.redis_url, socket_connect_timeout=3))
+
+
+@pytest.fixture(scope="session")
 def browser(config):
     from playwright.sync_api import sync_playwright
 

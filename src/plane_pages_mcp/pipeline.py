@@ -3,6 +3,13 @@
 Every write sets html + json + binary + stripped together (workpackage F1): the
 Yjs binary is authoritative for the editor, so an HTML-only write would be
 invisible in the UI and get overwritten by the live server.
+
+update_page has two more rules, both about the editor's own copies of a page:
+  * it refuses to write while the page is open in an editor, because the live
+    server's in-memory copy would overwrite ours (presence.py);
+  * it stores the new Yjs state as a continuation of the page's existing
+    history, so browsers holding an older cached copy converge on the new
+    content instead of merging old and new (yjs_state.py).
 """
 
 from __future__ import annotations
@@ -12,6 +19,8 @@ from typing import Any
 from . import convert
 from .db import ACCESS_PRIVATE, ACCESS_PUBLIC, Database, NotFoundError
 from .live import LiveConverter
+from .presence import LivePresence, PresenceError
+from .yjs_state import rebase_onto_existing
 
 
 class WriteError(RuntimeError):
@@ -88,21 +97,38 @@ def update_page(
     title: str | None,
     mode: str,
     service_user_id: str,
+    presence: LivePresence | None = None,
 ) -> dict[str, Any]:
     if mode not in ("replace", "append"):
         raise WriteError(f"mode must be 'replace' or 'append', got {mode!r}")
 
+    # Checked before touching the DB. If nobody can answer, refuse rather than
+    # risk a write the live server silently throws away. presence is None
+    # only when no Redis is configured (logged as a warning at startup).
+    if presence is not None:
+        try:
+            page_is_open = presence.is_open(page_id)
+        except PresenceError as exc:
+            raise WriteError(f"{exc}; refusing to write (try again shortly)") from exc
+        if page_is_open:
+            raise WriteError(
+                f"page {page_id} is open in the Plane editor right now; while it is "
+                "open, the editor's copy overwrites any change made here. Ask whoever "
+                "has it open to close it (or close it yourself), then retry."
+            )
+
     # For append we must read the current HTML under a row lock and combine
     # before rendering, so the whole operation is one transaction.
     with db.transaction() as conn:
-        current_html = db.get_page_html(conn, page_id)
-        if current_html is None:
+        current = db.get_page_content(conn, page_id)
+        if current is None:
             raise WriteError(f"page {page_id} not found (or deleted)")
 
         new_fragment = convert.to_html(content, fmt)
-        combined_html = current_html + new_fragment if mode == "append" else new_fragment
+        combined_html = current["html"] + new_fragment if mode == "append" else new_fragment
 
-        json_doc, binary = live.convert(combined_html, variant="rich")
+        json_doc, fresh_binary = live.convert(combined_html, variant="rich")
+        binary = rebase_onto_existing(existing=current["binary"], fresh=fresh_binary)
         stripped = convert.html_to_stripped(combined_html)
 
         rowcount = db.update_page_content(

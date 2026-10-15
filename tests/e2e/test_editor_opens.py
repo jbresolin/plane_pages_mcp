@@ -31,7 +31,7 @@ def _sentinel(title: str) -> str:
 
 
 def _write_page(path, construct_markdown, title, *, database, live, app_client,
-                config, workspace_id, project_id, service_user_id) -> str:
+                config, workspace_id, project_id, service_user_id, presence=None) -> str:
     """Write ``construct_markdown`` through one write path; return the page id."""
     body = f"{construct_markdown}\n\n{_sentinel(title)}\n"
     if path == "create":
@@ -52,7 +52,7 @@ def _write_page(path, construct_markdown, title, *, database, live, app_client,
         mode = "append"
     pipeline.update_page(
         database, live, page_id=page_id, content=body, fmt="markdown", title=None,
-        mode=mode, service_user_id=service_user_id,
+        mode=mode, service_user_id=service_user_id, presence=presence,
     )
     return page_id
 
@@ -86,7 +86,7 @@ def known_good_errors(browser, session_id, config, database, live, workspace_id,
 def test_page_opens_in_editor_and_round_trips(
     construct: Construct, path: str, unique_title, browser, session_id, config,
     database, live, app_client, workspace_id, project_id, service_user_id,
-    known_good_errors,
+    known_good_errors, presence,
 ):
     # What this checks: one markdown sample, written one way, must (a) open in
     # the real Plane editor without freezing or erroring, and (b) still say the
@@ -97,7 +97,7 @@ def test_page_opens_in_editor_and_round_trips(
     page_id = _write_page(
         path, construct.markdown, unique_title, database=database, live=live,
         app_client=app_client, config=config, workspace_id=workspace_id,
-        project_id=project_id, service_user_id=service_user_id,
+        project_id=project_id, service_user_id=service_user_id, presence=presence,
     )
     url = page_url(config.web_url, config.workspace_slug, project_id, page_id)
 

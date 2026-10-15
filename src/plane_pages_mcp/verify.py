@@ -263,6 +263,33 @@ def _verify_pages(cfg: Config, report: _Report) -> None:
     except (httpx.HTTPError, ValueError) as exc:
         report.check(False, f"POST {cfg.live_convert_url}", str(exc))
 
+    _verify_presence(cfg, report)
+
+
+def _verify_presence(cfg: Config, report: _Report) -> None:
+    """Can update_page ask the live server whether a page is open?"""
+    if not cfg.live_redis_url:
+        report.info(
+            "open-page check",
+            "no REDIS_URL / PLANE_LIVE_REDIS_URL — updates to a page open in the "
+            "editor will be lost",
+        )
+        return
+    import uuid
+
+    import redis
+
+    from .presence import LivePresence
+
+    client = redis.Redis.from_url(cfg.live_redis_url, socket_connect_timeout=3, socket_timeout=3)
+    _guard(report, "Plane Redis reachable (open-page check)", client.ping, report_success=True)
+    # A random id is never open, so this must come back False. It shows the
+    # round trip works without depending on any real page's state.
+    answer = _guard(report, "open-page check answers",
+                    lambda: LivePresence(client).is_open(str(uuid.uuid4())))
+    if answer is not _FAILED:
+        report.check(answer is False, "open-page check reports an unknown page as closed")
+
 
 def _verify_rest(cfg: Config, report: _Report) -> None:
     print("\n== Work-items subsystem (public REST API) ==")
