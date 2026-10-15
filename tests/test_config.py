@@ -123,3 +123,37 @@ def test_stdio_needs_no_oauth(monkeypatch):
     monkeypatch.setenv("PLANE_API_KEY", "pat")
     cfg = Config.from_env()  # must not raise
     assert not cfg.auth_enabled
+
+
+def test_live_redis_url_defaults_to_redis_url(monkeypatch):
+    # Checks: without PLANE_LIVE_REDIS_URL, the "is this page open?" check
+    # uses the same Redis as the OAuth storage (REDIS_URL).
+    # Why: in the standard deployment both are Plane's own Redis, and Redis
+    # pub/sub ignores the database number, so existing deployments get the
+    # open-page protection without any new setting.
+    monkeypatch.delenv("PLANE_LIVE_REDIS_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("SERVICE_USER_ID", "u")
+    monkeypatch.setenv("REDIS_URL", "redis://plane-redis:6379/1")
+    assert Config.from_env().live_redis_url == "redis://plane-redis:6379/1"
+
+
+def test_live_redis_url_can_be_set_separately(monkeypatch):
+    # Checks: PLANE_LIVE_REDIS_URL wins over REDIS_URL when both are set.
+    # Why: lets an operator keep OAuth state on a different Redis from the
+    # one Plane's live server uses.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("SERVICE_USER_ID", "u")
+    monkeypatch.setenv("REDIS_URL", "redis://oauth:6379/1")
+    monkeypatch.setenv("PLANE_LIVE_REDIS_URL", "redis://plane-redis:6379/0")
+    assert Config.from_env().live_redis_url == "redis://plane-redis:6379/0"
+
+
+def test_live_redis_url_is_none_without_any_redis(monkeypatch):
+    # Checks: with neither variable set (e.g. stdio on a dev box), the value
+    # is None, which tells the server to skip the open-page check.
+    # Why: Redis must stay optional; the server logs a warning instead.
+    monkeypatch.delenv("PLANE_LIVE_REDIS_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("SERVICE_USER_ID", "u")
+    assert Config.from_env().live_redis_url is None
