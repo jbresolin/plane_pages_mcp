@@ -93,3 +93,33 @@ deployment; pub/sub ignores the DB number). `PLANE_LIVE_REDIS_URL` overrides.
 **Known gap.** A tab opened in the sub-second window between the check and the
 commit loads the old state, and its copy wins. Accepted: it needs a person
 opening the page at that exact moment.
+
+## 2026-10-15: create_project enforces the web UI's identifier rule
+
+**Decision.** `create_project` accepts an identifier only if, after trimming
+and uppercasing, it is 1–10 characters from `A-Z`, `0-9` and `ÇŞĞIİÖÜ`. It
+also rejects names containing Plane's forbidden characters
+(`& + , : ; $ ^ } { * = ? @ # | ' < > . ( ) % ! -`) or longer than 255
+characters. All of this is checked before calling Plane.
+
+**Reason.** Plane v1.3.1 has two rules. The API/model allows 12 characters
+and anything except the forbidden set (so spaces, `_`, any Unicode letter).
+The web UI's create form allows 1–10 of `[ÇŞĞIİÖÜA-Z0-9]`. A project created
+with an API-only identifier works, but the UI's settings form then rejects it
+when someone edits the project. Chosen with the operator. The name check
+mirrors the serializer, which applies the forbidden set to names too.
+
+## 2026-10-15: Explain Plane's ambiguous 409 on project create
+
+**Decision.** On HTTP 409 from project create, list the workspace's projects
+and report whether the **identifier** (compared uppercase) or the **name**
+(compared exactly) is taken. If no visible project matches, say "name or
+identifier in use, possibly by an archived project or one this key can't
+see". There is no pre-check, so a normal create is a single request.
+
+**Reason.** Plane v1.3.1 answers `409 {"name": "The project name is already
+taken"}` for a duplicate identifier too (verified on the dev stack), which
+sends the caller to change the wrong field. Names are unique
+case-sensitively ("ZZ PROBE" and "zz probe" coexist); identifiers are stored
+uppercase, so they clash regardless of case. A deleted project's identifier
+can be reused.

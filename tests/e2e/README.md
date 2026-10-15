@@ -34,6 +34,9 @@ the next one.
 - **Editor copies** (`test_editor_sync.py`): a browser that saw the old
   version sees only the update after reopening, and an update is refused
   while the page is open in a tab, then accepted once it closes.
+- **create_project** (`test_create_project.py`): creates real projects
+  through the MCP tool, checks the duplicate-identifier message against
+  Plane's actual 409, and deletes what it created.
 - **Round trip**: the stored HTML, after the editor has had the page open, is
   converted back with the same function `read_page` uses. The sample's key
   strings must still be there.
@@ -52,6 +55,7 @@ the next one.
 | `PLANE_E2E_API_CONTAINER` | `plane-dev-api-1` | if no session is given, one is minted with `docker exec` in this container |
 | `PLANE_E2E_CHROMIUM` | Playwright's own | path to a Chromium binary, if you don't run `playwright install chromium` |
 | `PLANE_E2E_REDIS_URL` | `redis://localhost:6380/0` | Plane's Redis, for the open-page check |
+| `PLANE_E2E_API_KEY` | unset | Plane API token for the REST tests (`test_create_project.py`, skipped without it); its user must be a workspace Admin/Member |
 
 Plane's stock compose file doesn't publish Redis. For the dev stack, add a
 compose override like this (6379 is often taken on the host):

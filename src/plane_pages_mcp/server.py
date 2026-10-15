@@ -22,13 +22,14 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
-from . import auth, comments, containers, convert, pipeline, relations, workitems
+from . import auth, comments, containers, convert, pipeline, projects, relations, workitems
 from .config import Config
 from .containers import ContainerError
 from .db import Database, NotFoundError
 from .live import ConvertError, LiveConverter
 from .pipeline import WriteError
 from .presence import LivePresence
+from .projects import ProjectError
 from .relations import RelationError
 from .rest import PlaneREST, RestError
 from .workitems import WorkItemError
@@ -314,6 +315,36 @@ def _register_work_item_tools(mcp: FastMCP, state: AppState) -> None:
             return workitems.list_projects(rest, _slug(workspace))
         except (RestError, WorkspaceUnset) as exc:
             return _error(str(exc))
+
+    @mcp.tool
+    def create_project(
+        workspace: str,
+        name: str,
+        identifier: str,
+        description: str | None = None,
+    ) -> dict:
+        """Create a project (REST). Returns its id and identifier.
+
+        Args:
+            workspace: workspace slug — REQUIRED (no default).
+            name: project name; may not contain & + , : ; $ ^ } { * = ? @ # | ' < > . ( ) % ! -
+            identifier: short key used in work-item ids (e.g. "HOME" -> HOME-12):
+                1-10 letters/digits, stored uppercase.
+            description: optional plain text.
+
+        The API key's user must be a workspace Admin or Member, and becomes the
+        project's admin.
+        """
+        if not workspace:
+            return _error("workspace is required for create_project (no default is applied)")
+        try:
+            result = projects.create_project(
+                rest, workspace, name=name, identifier=identifier, description=description
+            )
+        except (ProjectError, RestError) as exc:
+            return _error(str(exc))
+        log.info("created project %s in %s", result["identifier"], workspace)
+        return result
 
     @mcp.tool
     def list_work_items(

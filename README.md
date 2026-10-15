@@ -106,6 +106,7 @@ configured id — simpler, and attribution stays accurate.
 | Tool | Purpose |
 | --- | --- |
 | `list_projects(workspace?)` | id, name, identifier, description. |
+| `create_project(workspace, name, identifier, description?)` | **`workspace` required.** Returns id + identifier. Identifier: 1–10 letters/digits (Plane's UI rule), stored uppercase. A taken identifier or name gets a message saying which. The API key's user must be a workspace Admin/Member. |
 | `list_work_items(project, workspace?, state_name?, assignee?, limit=50)` | Issues with sequence id (`TEST-42`), state/assignee **names** (not UUIDs), priority. |
 | `get_work_item(item, project, workspace?)` | Full detail; `item` = `TEST-42` or UUID; description as markdown; `parent` (as a sequence ref) and `sub_issues_count`. |
 | `create_work_item(project, title, workspace, description?, state_name?, priority?, assignees?, labels?, parent?)` | **`workspace` required**; human names resolved to UUIDs. `parent` (a `TEST-42`/UUID ref) creates a **sub-work-item**. |
