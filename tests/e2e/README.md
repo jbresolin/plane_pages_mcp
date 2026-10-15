@@ -34,9 +34,15 @@ the next one.
 - **Editor copies** (`test_editor_sync.py`): a browser that saw the old
   version sees only the update after reopening, and an update is refused
   while the page is open in a tab, then accepted once it closes.
-- **create_project** (`test_create_project.py`): creates real projects
-  through the MCP tool, checks the duplicate-identifier message against
-  Plane's actual 409, and deletes what it created.
+- **create_project / add_project_member** (`test_create_project.py`):
+  creates real projects through the MCP tools and deletes them again. It
+  checks the duplicate-identifier message against Plane's actual 409, that the
+  lead (or `DEFAULT_PROJECT_LEAD`) becomes project Admin, that a Guest lead is
+  refused with no project created, and that a private project is missing from
+  a non-member's project list until `add_project_member` adds them. It creates
+  two dev-only users once (`e2e-member@plane.local` as workspace Member,
+  `e2e-guest@plane.local` as Guest) through Plane's models in the api
+  container.
 - **Round trip**: the stored HTML, after the editor has had the page open, is
   converted back with the same function `read_page` uses. The sample's key
   strings must still be there.

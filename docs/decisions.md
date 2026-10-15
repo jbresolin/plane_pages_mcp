@@ -123,3 +123,75 @@ sends the caller to change the wrong field. Names are unique
 case-sensitively ("ZZ PROBE" and "zz probe" coexist); identifiers are stored
 uppercase, so they clash regardless of case. A deleted project's identifier
 can be reused.
+
+## 2026-10-15: Never send `project_lead` to Plane
+
+**Decision.** `create_project` never sends Plane's `project_lead` field, on
+create or by PATCH. The lead is added as a project member through
+`POST …/projects/<id>/members/` after the project exists.
+
+**Reason.** In Plane v1.3.1, `POST /api/v1/workspaces/<slug>/projects/` with
+`project_lead` set is broken:
+
+- After saving the project, the view runs
+  `ProjectMember.objects.create(member_id=serializer.instance.project_lead, …)`.
+  That passes a `User` object where Django expects a UUID, which raises
+  `ValidationError: "<username> <email>" is not a valid UUID`.
+- The API returns `400 {"error": "Please provide valid detail"}`.
+- Nothing is wrapped in a transaction, so the project **already exists**: the
+  API key's user is Admin, there is no lead and **no default states**. That's
+  a half-created project.
+- Reproduced on the dev stack with both another member and the key's own
+  user as lead. (The view's "lead is the caller" check also compares
+  `str(User)` to an id, so it never matches.)
+
+Do not "fix" this by sending `project_lead` until Plane is upgraded and the
+bug is confirmed gone. The UI's "lead" label is cosmetic; membership is what
+makes the project visible.
+
+## 2026-10-15: Project lead = project Admin; workspace Guests can't join
+
+**Decision.**
+- `create_project(lead=…)`, or `DEFAULT_PROJECT_LEAD` when no lead is given,
+  adds that person as project **Admin** (role 20).
+- The lead is matched exactly: email ignoring case, or display name as
+  written. No match, or several matches, is an error that lists the
+  candidates.
+- Workspace **Guests** are refused, before anything is created.
+- If adding the lead fails after the project exists, the project is kept and
+  the result's `notes` say the lead was NOT added, why, and give the exact
+  `add_project_member(...)` call that fixes it.
+- `add_project_member` uses the same lookup and Guest rule, and allows roles
+  `admin`/`member` only.
+- If the lead is the API key's own user, nothing more is sent: they're
+  already Admin, and adding them again would fail.
+
+**Reason.** Projects created by the MCP had only the service user as a
+member, so the person who asked couldn't see them. Plane itself would make a
+workspace Guest a project Admin if asked, so the rule is ours. Chosen with the
+operator.
+
+## 2026-10-15: New projects are private by default (direct DB write)
+
+**Decision.** `create_project(visibility="private")` is the default.
+`network` is always sent explicitly (0 private, 2 public). Because Plane
+v1.3.1 ignores it, a private project is then made private with
+`UPDATE projects SET network = 0` (`db.set_project_network`). That needs
+`DATABASE_URL` and `GRANT UPDATE (network, updated_at) ON projects`, and
+`verify` checks the grant. If the write can't happen (no DB, or it fails), the
+project is kept and reported as `"visibility": "public"` with a note saying
+so. When no lead ends up a member, the notes say only the service user is a
+member, and that nobody else can see a private project, naming
+`add_project_member` as the fix.
+
+**Reason.** Plane stores visibility in `projects.network` (`NETWORK_CHOICES`:
+0 "Secret", 2 "Public"; model default 2). The v1.3.1 REST create and update
+serializers don't include `network`. POST and PATCH with `network: 0` both
+succeed and the project stays public (verified on the dev stack). A private
+default can only be reached by writing the column. The relations tools set
+the precedent for narrow DB writes where the API falls short. Chosen with the
+operator.
+
+**Checked.** On the dev stack, a private project is absent from a
+non-member's project list in the web app (direct GET returns 403) and appears
+once they are added.

@@ -481,6 +481,21 @@ class Database:
                 (issue_id, issue_id),
             ).fetchall()
 
+    def set_project_network(self, project_id: str, network: int) -> int:
+        """Set a project's visibility (0 private, 2 public); returns rows updated.
+
+        Plane v1.3.1's REST API ignores ``network`` on create and update, so
+        create_project makes a project private with this one-column write.
+        Needs ``GRANT UPDATE (network, updated_at) ON projects``.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE projects SET network = %s, updated_at = now() "
+                "WHERE id = %s AND deleted_at IS NULL",
+                (network, project_id),
+            )
+            return cur.rowcount
+
     @contextmanager
     def transaction(self) -> Iterator[psycopg.Connection]:
         with self._conn() as conn:

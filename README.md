@@ -106,7 +106,8 @@ configured id — simpler, and attribution stays accurate.
 | Tool | Purpose |
 | --- | --- |
 | `list_projects(workspace?)` | id, name, identifier, description. |
-| `create_project(workspace, name, identifier, description?)` | **`workspace` required.** Returns id + identifier. Identifier: 1–10 letters/digits (Plane's UI rule), stored uppercase. A taken identifier or name gets a message saying which. The API key's user must be a workspace Admin/Member. |
+| `create_project(workspace, name, identifier, description?, lead?, visibility="private")` | **`workspace` required.** Returns id, identifier, `visibility`, `lead`, `notes`. Identifier: 1–10 letters/digits (Plane's UI rule), stored uppercase; a taken identifier or name gets a message saying which. `lead` (email or exact display name; default `DEFAULT_PROJECT_LEAD`) is added as project **Admin**; workspace Guests are refused before anything is created. **Read `notes`**: they say if the lead wasn't added or the project couldn't be made private, and how to fix it. The API key's user must be a workspace Admin/Member. |
+| `add_project_member(workspace, project, member, role)` | **`workspace` required.** Add a workspace Admin/Member (email or exact display name) as `admin` or `member`. Guests are refused. |
 | `list_work_items(project, workspace?, state_name?, assignee?, limit=50)` | Issues with sequence id (`TEST-42`), state/assignee **names** (not UUIDs), priority. |
 | `get_work_item(item, project, workspace?)` | Full detail; `item` = `TEST-42` or UUID; description as markdown; `parent` (as a sequence ref) and `sub_issues_count`. |
 | `create_work_item(project, title, workspace, description?, state_name?, priority?, assignees?, labels?, parent?)` | **`workspace` required**; human names resolved to UUIDs. `parent` (a `TEST-42`/UUID ref) creates a **sub-work-item**. |
@@ -165,6 +166,7 @@ Set via environment (see [`.env.example`](.env.example)):
 | `PLANE_WEB_URL` | `http://localhost` | pages only; builds the UI URL from `create_page` |
 | `PLANE_BASE_URL` | — | **work items**; instance site root, client appends `/api/v1` |
 | `PLANE_API_KEY` | — | **work items**; PAT, sent as header `x-api-key` |
+| `DEFAULT_PROJECT_LEAD` | — | work items; email of the person `create_project` adds as project Admin when no `lead` is given. Unset → only the service user is a member (the result says so) |
 | `WORKSPACE_SLUG` | — | **default** workspace (not a fixture); may be unset |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | — | **http auth**; per-environment GitHub OAuth app |
 | `PUBLIC_BASE_URL` | — | **http auth**; public origin, e.g. `https://planemcp.<domain>` (no `/mcp`) |
@@ -252,6 +254,9 @@ GRANT SELECT ON users TO plane_pages;
 -- work-item relations (only if you use link_work_items / unlink_work_items):
 GRANT SELECT ON issues TO plane_pages;
 GRANT SELECT, INSERT, DELETE ON issue_relations TO plane_pages;
+-- private projects (create_project): Plane v1.3.1's API ignores visibility,
+-- so the MCP sets this one column itself. Without it, projects stay PUBLIC.
+GRANT UPDATE (network, updated_at) ON projects TO plane_pages;
 -- no other tables
 ```
 

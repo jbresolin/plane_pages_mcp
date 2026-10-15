@@ -16,32 +16,17 @@ A fake REST client stands in for Plane and records what would have been sent.
 """
 
 import pytest
+from project_fakes import FakeREST
 
 from plane_pages_mcp import projects
 from plane_pages_mcp.projects import ProjectError
-from plane_pages_mcp.rest import PlaneREST, RestConflict
-
-PLANE_DUPLICATE_BODY = '{"name":"The project name is already taken"}'
-
-
-class FakeREST(PlaneREST):
-    def __init__(self, existing=None, conflict=False):  # no real HTTP client
-        self.existing = existing or []
-        self.conflict = conflict
-        self.sent = None
-
-    def create_project(self, slug, payload):
-        self.sent = (slug, payload)
-        if self.conflict:
-            raise RestConflict(f"POST .../projects/ -> 409: {PLANE_DUPLICATE_BODY}")
-        return {"id": "new-id", "identifier": payload["identifier"], "name": payload["name"]}
-
-    def list_projects(self, slug):
-        return self.existing
 
 
 def _create(rest, **overrides):
-    args = {"name": "Home Lab", "identifier": "HOME", "description": None}
+    # visibility="public" keeps these tests about validation and duplicates;
+    # lead and visibility have their own file (test_project_lead_visibility.py).
+    args = {"name": "Home Lab", "identifier": "HOME", "description": None,
+            "visibility": "public"}
     args.update(overrides)
     return projects.create_project(rest, "test", **args)
 
@@ -128,7 +113,8 @@ def test_returns_the_new_projects_id_and_identifier():
     # Why: the id and identifier are what the caller needs next, e.g. to
     # create work items in the new project.
     result = _create(FakeREST())
-    assert result == {"id": "new-id", "identifier": "HOME", "name": "Home Lab", "workspace": "test"}
+    assert (result["id"], result["identifier"], result["name"], result["workspace"]) == (
+        "new-id", "HOME", "Home Lab", "test")
 
 
 def test_description_is_sent_only_when_given():
