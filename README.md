@@ -106,7 +106,7 @@ configured id — simpler, and attribution stays accurate.
 | Tool | Purpose |
 | --- | --- |
 | `list_projects(workspace?)` | id, name, identifier, description. |
-| `create_project(workspace, name, identifier, description?, lead?, visibility="private")` | **`workspace` required.** Returns id, identifier, `visibility`, `lead`, `notes`. Identifier: 1–10 letters/digits (Plane's UI rule), stored uppercase; a taken identifier or name gets a message saying which. `lead` (email or exact display name; default `DEFAULT_PROJECT_LEAD`) is added as project **Admin**; workspace Guests are refused before anything is created. **Read `notes`**: they say if the lead wasn't added or the project couldn't be made private, and how to fix it. The API key's user must be a workspace Admin/Member. |
+| `create_project(workspace, name, identifier, description?, lead?, visibility="private")` | **`workspace` required.** Returns id, identifier, `visibility`, `lead`, `notes`. Identifier: 1–10 letters/digits (Plane's UI rule), stored uppercase; a taken identifier or name gets a message saying which. `lead` (email or exact display name; default `DEFAULT_PROJECT_LEAD`) is added as project **Admin**; workspace Guests are refused before anything is created. `visibility="private"` needs DB access plus the `projects(network)` grant (see Database role) and is refused up front without them. **Read `notes`**: they say if the lead wasn't added or the project couldn't be made private, and how to fix it. The API key's user must be a workspace Admin/Member. |
 | `add_project_member(workspace, project, member, role)` | **`workspace` required.** Add a workspace Admin/Member (email or exact display name) as `admin` or `member`. Guests are refused. |
 | `list_work_items(project, workspace?, state_name?, assignee?, limit=50)` | Issues with sequence id (`TEST-42`), state/assignee **names** (not UUIDs), priority. |
 | `get_work_item(item, project, workspace?)` | Full detail; `item` = `TEST-42` or UUID; description as markdown; `parent` (as a sequence ref) and `sub_issues_count`. |
@@ -255,7 +255,8 @@ GRANT SELECT ON users TO plane_pages;
 GRANT SELECT ON issues TO plane_pages;
 GRANT SELECT, INSERT, DELETE ON issue_relations TO plane_pages;
 -- private projects (create_project): Plane v1.3.1's API ignores visibility,
--- so the MCP sets this one column itself. Without it, projects stay PUBLIC.
+-- so the MCP sets this one column itself. Without it, create_project refuses
+-- visibility="private" (the default) before creating anything.
 GRANT UPDATE (network, updated_at) ON projects TO plane_pages;
 -- no other tables
 ```

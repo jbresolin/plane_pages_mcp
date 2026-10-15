@@ -177,10 +177,18 @@ operator.
 `network` is always sent explicitly (0 private, 2 public). Because Plane
 v1.3.1 ignores it, a private project is then made private with
 `UPDATE projects SET network = 0` (`db.set_project_network`). That needs
-`DATABASE_URL` and `GRANT UPDATE (network, updated_at) ON projects`, and
-`verify` checks the grant. If the write can't happen (no DB, or it fails), the
-project is kept and reported as `"visibility": "public"` with a note saying
-so. When no lead ends up a member, the notes say only the service user is a
+`DATABASE_URL` and `GRANT UPDATE (network, updated_at) ON projects`.
+
+**Checked before creating (added 2026-10-15, at the operator's request).** For
+a private project, `create_project` first confirms the write can happen, and
+**refuses without creating anything** if there is no database access or the
+role lacks the grant. The error gives the fix: set `DATABASE_URL`, run the
+`GRANT`, or pass `visibility="public"` if a public project is really wanted.
+The grant check is the same `has_column_privilege` query `verify` uses
+(`db.PROJECT_NETWORK_GRANT_SQL`), and if the check itself errors, that is a
+refusal too. Only a failure of the write itself, after the create, leaves a
+public project; it is kept and reported as `"visibility": "public"` with a
+note. When no lead ends up a member, the notes say only the service user is a
 member, and that nobody else can see a private project, naming
 `add_project_member` as the fix.
 

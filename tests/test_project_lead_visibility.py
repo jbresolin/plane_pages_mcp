@@ -74,8 +74,9 @@ def test_unknown_visibility_is_refused_before_creating_anything():
 
 
 def test_private_project_stays_public_and_says_so_when_the_database_write_fails():
-    # Checks: if making the project private fails (here: the database refuses),
-    # the project is kept, the result says "public", and a note explains why.
+    # Checks: if the grant check passed but the write itself then fails (here:
+    # the database raises), the project is kept, the result says "public",
+    # and a note explains why.
     # Why: the project already exists in Plane at that point. Claiming it is
     # private when it isn't would be a dangerous lie; deleting it was not
     # asked for.
@@ -86,14 +87,40 @@ def test_private_project_stays_public_and_says_so_when_the_database_write_fails(
     assert "PUBLIC" in _notes(result) and "permission denied" in _notes(result)
 
 
-def test_private_project_without_database_access_says_it_is_public():
+def test_private_is_refused_without_database_access_and_nothing_is_created():
     # Checks: when the server has no database configured, a "private" request
-    # still creates the project, and the result says plainly that it is public.
-    # Why: same reason. The REST API can't make a project private in v1.3.1,
-    # and the caller must know what they actually got.
-    result = _create(FakeREST(), db=None, lead="bo")
-    assert result["visibility"] == "public"
-    assert "PUBLIC" in _notes(result) and "DATABASE_URL" in _notes(result)
+    # is refused with an error that says how to fix it (set DATABASE_URL, or
+    # ask for visibility="public"), and no project is created.
+    # Why: Plane's API can't make a project private, so without the database
+    # the project would come out public. Finding that out before creating
+    # anything means no unwanted public project is ever made.
+    rest = FakeREST()
+    with pytest.raises(ProjectError, match="DATABASE_URL") as err:
+        _create(rest, db=None, lead="bo")
+    assert "visibility='public'" in str(err.value)
+    assert rest.sent is None
+
+
+def test_private_is_refused_without_the_update_grant_and_nothing_is_created():
+    # Checks: when the database role lacks UPDATE on projects(network,
+    # updated_at), a "private" request is refused with the exact GRANT to run
+    # (or the visibility="public" alternative), and no project is created.
+    # Why: same reason. The write would fail after the project exists,
+    # leaving it public, so this is checked up front with the same query that
+    # `verify` uses.
+    rest, db = FakeREST(), FakeDatabase(has_grant=False)
+    with pytest.raises(ProjectError, match=r"GRANT UPDATE \(network, updated_at\) ON projects") as err:
+        _create(rest, db, lead="bo")
+    assert "visibility='public'" in str(err.value)
+    assert rest.sent is None and db.calls == []
+
+
+def test_public_projects_need_neither_database_nor_grant():
+    # Checks: visibility="public" works with no database at all.
+    # Why: the up-front check is only about making projects private. A public
+    # project must keep working on a REST-only server.
+    result = _create(FakeREST(), db=None, lead="bo", visibility="public")
+    assert result["visibility"] == "public" and result["notes"] == []
 
 
 # --- lead -----------------------------------------------------------------------
@@ -174,7 +201,7 @@ def test_failure_to_add_the_lead_keeps_the_project_and_explains_the_fix():
     # an honest account and a one-step fix, not an error that hides that a
     # project was made.
     rest = FakeREST(add_member_error=RestError("POST .../members/ -> 400: payload is not valid"))
-    result = _create(rest, FakeDatabase(), lead="bo")
+    result = _create(rest, FakeDatabase(), lead="bo")  # private, with DB + grant
     assert result["id"] == "new-id" and result["lead"] is None
     notes = _notes(result)
     assert "bo@example.com was NOT added" in notes and "payload is not valid" in notes

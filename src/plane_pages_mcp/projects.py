@@ -30,6 +30,7 @@ import re
 from typing import Any
 
 from . import members
+from .db import PROJECT_NETWORK_GRANT
 from .rest import PlaneREST, RestConflict, RestError
 
 IDENTIFIER_MAX_LENGTH = 10  # the web UI's limit (the column allows 12)
@@ -96,10 +97,11 @@ def create_project(
 ) -> dict[str, Any]:
     """Create a project, make it private if asked, and add its lead as Admin.
 
-    Order: validate everything (including the lead) -> create via REST ->
-    make private in the DB -> add the lead. Anything that can be refused is
-    refused before the project exists. A failure after that keeps the project
-    and is reported in ``notes``, because the project is real by then.
+    Order: validate everything (the lead, and for a private project that the
+    DB write is possible) -> create via REST -> make private in the DB -> add
+    the lead. Anything that can be refused is refused before the project
+    exists. A failure after that keeps the project and is reported in
+    ``notes``, because the project is real by then.
 
     ``db`` is the pages Database (or None when DATABASE_URL isn't set); it is
     only used for the private-visibility write.
@@ -109,6 +111,8 @@ def create_project(
     if visibility not in NETWORK:
         raise ProjectError(f"visibility must be 'private' or 'public', got {visibility!r}")
     lead_member = _resolve_lead(rest, slug, lead or default_lead)
+    if visibility == "private":
+        _require_private_is_possible(db)
 
     # Sent explicitly even though v1.3.1 ignores it, so that if a later Plane
     # starts honouring it, Plane's own default still never decides.
@@ -158,18 +162,45 @@ def _resolve_lead(rest: PlaneREST, slug: str, ref: str | None) -> dict | None:
     return person
 
 
+def _require_private_is_possible(db: Any) -> None:
+    """Refuse up front if a private project would come out public.
+
+    Plane's API can't make a project private, so it takes our DB write. If
+    that can't happen, refusing now is better than creating a public project.
+    Only a failure of the write itself (after this check passed) leaves a
+    public project behind, and the result says so.
+    """
+    alternative = "or pass visibility='public' if a public project is really wanted"
+    if db is None:
+        raise ProjectError(
+            "cannot create a private project: Plane's API ignores visibility, and this "
+            "server has no database access to set it (configure DATABASE_URL), "
+            + alternative
+        )
+    try:
+        has_grant = db.can_set_project_network()
+    except Exception as exc:  # can't tell -> don't risk a public project
+        raise ProjectError(
+            f"cannot create a private project: checking the database grant failed ({exc}); "
+            + alternative
+        ) from exc
+    if not has_grant:
+        raise ProjectError(
+            "cannot create a private project: the database role may not update project "
+            f"visibility. Fix with: {PROJECT_NETWORK_GRANT}; " + alternative
+        )
+
+
 def _visibility_of(project: dict) -> str:
     return "private" if project.get("network") == NETWORK["private"] else "public"
 
 
 def _make_private(db: Any, project_id: str, notes: list[str]) -> str:
-    """Plane v1.3.1's API ignores ``network``, so write it directly. Returns the result."""
-    if db is None:
-        notes.append(
-            "The project is PUBLIC: Plane's API can't create private projects, and "
-            "this server has no database access (DATABASE_URL) to make it private."
-        )
-        return "public"
+    """Plane v1.3.1's API ignores ``network``, so write it directly. Returns the result.
+
+    The grant was checked before the create; this handles the write failing
+    anyway (row gone, connection lost, ...).
+    """
     try:
         if db.set_project_network(project_id, NETWORK["private"]) != 1:
             raise RuntimeError("the project row was not found")

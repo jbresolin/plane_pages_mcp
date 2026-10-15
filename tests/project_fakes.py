@@ -50,11 +50,15 @@ class FakeREST(PlaneREST):
 
 
 class FakeDatabase:
-    """Stands in for Database.set_project_network (the private-visibility write)."""
+    """Stands in for the Database's private-visibility check and write."""
 
-    def __init__(self, error=None):
-        self.error = error
+    def __init__(self, error=None, has_grant=True):
+        self.error = error            # raised by the write itself
+        self.has_grant = has_grant    # what the up-front grant check reports
         self.calls: list[tuple] = []
+
+    def can_set_project_network(self):
+        return self.has_grant
 
     def set_project_network(self, project_id, network):
         if self.error:

@@ -257,3 +257,49 @@ def test_add_project_member_refuses_a_guest(call_tool, config, created_projects,
     })
     assert "workspace Guest" in refused.get("error", "")
     assert _project_role(config, result["id"], dev_users["guest"]) is None
+
+
+@pytest.fixture
+def role_without_visibility_grant(config):
+    """A throwaway Postgres role that can read projects but not update them.
+
+    Dev stack only: created through the harness's own (superuser) connection
+    and dropped again afterwards.
+    """
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    role = "pp_e2e_no_grant"
+    with psycopg.connect(config.database_url, autocommit=True) as admin:
+        admin.execute(f"DROP ROLE IF EXISTS {role}")
+        admin.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{role}'")
+        admin.execute(f"GRANT SELECT ON projects TO {role}")
+    params = conninfo_to_dict(config.database_url)
+    yield make_conninfo(**{**params, "user": role, "password": role})
+    with psycopg.connect(config.database_url, autocommit=True) as admin:
+        admin.execute(f"REVOKE ALL ON projects FROM {role}")
+        admin.execute(f"DROP ROLE {role}")
+
+
+def test_private_is_refused_up_front_when_the_role_lacks_the_grant(
+    call_tool, config, monkeypatch, role_without_visibility_grant,
+):
+    # What this checks: with a database role that may not update
+    # projects(network, updated_at), a private create_project is refused
+    # with the GRANT to run, and no project is created at all.
+    # Why: the unit tests fake the grant check. This runs the real query
+    # through the real database code. It caught a bug the fakes hid: the
+    # check read the result the wrong way and would have refused every
+    # private project.
+    import psycopg
+
+    monkeypatch.setenv("DATABASE_URL", role_without_visibility_grant)
+    identifier = _fresh_identifier()
+    result = call_tool("create_project", {
+        "workspace": config.workspace_slug, "name": f"e2e {identifier}", "identifier": identifier,
+    })
+    assert "GRANT UPDATE (network, updated_at) ON projects" in result.get("error", ""), result
+    with psycopg.connect(config.database_url) as conn:
+        count = conn.execute("SELECT count(*) FROM projects WHERE identifier = %s",
+                             (identifier,)).fetchone()[0]
+    assert count == 0
