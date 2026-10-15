@@ -21,6 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Only for the editor harness in tests/e2e (needs a running Plane).
+e2e = ["pytest>=8.0", "playwright>=1.50"]
 
 [project.scripts]
 plane-pages-mcp = "plane_pages_mcp.__main__:main"
