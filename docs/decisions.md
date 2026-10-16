@@ -280,4 +280,4 @@ nothing tied a running image to a commit. The tag check, the smoke test and
 the metadata-based `__version__` make the tag, the label and the code agree
 by construction.
 
-**Not done.** Actions are pinned to major versions (`@v4`), not commit SHAs.
+**Not done.** Actions are pinned to their current major versions (`checkout@v7`, `build-push-action@v7`, …), not commit SHAs.
