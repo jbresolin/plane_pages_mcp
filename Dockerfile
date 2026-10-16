@@ -1,5 +1,16 @@
 FROM python:3.12-slim
 
+# Stamped by the release workflow (.github/workflows/ci.yml) so a running
+# container can be traced back to its commit:
+#   docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' <image>
+# A manual build can pass them too: --build-arg VERSION=... --build-arg REVISION=$(git rev-parse HEAD)
+ARG VERSION=unknown
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="plane_pages_mcp" \
+      org.opencontainers.image.source="https://github.com/jbresolin/plane_pages_mcp" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1

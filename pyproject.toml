@@ -1,6 +1,6 @@
 [project]
 name = "plane_pages_mcp"
-version = "0.1.0"
+version = "0.3.0"
 description = "MCP server exposing read/write access to Plane CE Pages (absent from CE's public REST API)."
 readme = "README.md"
 requires-python = ">=3.12"

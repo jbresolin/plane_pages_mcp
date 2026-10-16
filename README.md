@@ -366,12 +366,15 @@ Claude mobile with no extra setup. Every identity must be in
 
 ## Deployment (Docker Compose)
 
-Build and add this service to your Plane stack (same network as `plane-db` and
-`live`; publish only the MCP port):
+Images are published to Docker Hub as `jbresolin/plane_pages_mcp:vX.Y.Z` (and
+`:latest`) by the release workflow; see "Making a release" below. Pin a
+version tag in production, not `latest`. Add this service to your Plane stack
+(same network as `plane-db`, `live` and `plane-redis`; publish only the MCP
+port):
 
 ```yaml
   pages-mcp:
-    image: <registry>/plane_pages_mcp:${PAGES_MCP_RELEASE:-latest}
+    image: jbresolin/plane_pages_mcp:${PAGES_MCP_RELEASE:-v0.3.0}
     deploy: { replicas: 1, restart_policy: { condition: any } }
     ports: ["8300:8300"]
     environment:
@@ -408,6 +411,47 @@ the `/.well-known/*` documents all flow through the existing route untouched;
 nothing to change there. The `convert-document` endpoint has **no auth** and must
 remain reachable only inside the compose network. After cutover, rotate/burn the
 old `MCP_AUTH_TOKEN` everywhere it was stored — it circulated in shells and configs.
+
+### Making a release
+
+`.github/workflows/ci.yml` runs the unit tests on every pull request and every
+push to `master`. A **version tag** also builds and publishes the image:
+
+1. In a pull request, bump `version` in `pyproject.toml` (e.g. `0.3.0`), then
+   merge it.
+2. Tag the merge commit on `master` with `v` + that version and push the tag:
+   ```sh
+   git switch master && git pull
+   git tag -a v0.3.0 -m "v0.3.0"
+   git push origin v0.3.0
+   ```
+3. The workflow then runs these steps, and any failure stops the release
+   before anything is pushed:
+   - it runs the tests;
+   - it **refuses** if the tag isn't exactly `v` + the `pyproject.toml`
+     version (`scripts/check_release_version.py`);
+   - it builds the image with the labels `org.opencontainers.image.version`
+     (`0.3.0`) and `org.opencontainers.image.revision` (the full commit SHA);
+   - it checks that the image reports that version and carries both labels;
+   - it pushes `jbresolin/plane_pages_mcp:v0.3.0` and `:latest`.
+
+It needs the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a
+Docker Hub access token with read/write on the repository). The code's
+`plane_pages_mcp.__version__` is read from the installed package metadata,
+so `pyproject.toml` is the only place the version is written.
+
+### Which commit is this container running?
+
+```sh
+# a running container (name as in `docker ps`, e.g. the Portainer stack's):
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' <container>
+# an image:
+docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }} {{ index .Config.Labels "org.opencontainers.image.version" }}' jbresolin/plane_pages_mcp:v0.3.0
+```
+
+The revision is the full git commit SHA. `git show <sha>` shows it, or
+`https://github.com/jbresolin/plane_pages_mcp/commit/<sha>`. Images built
+before v0.3.0 carry no labels, and the commands print `<no value>`.
 
 ## Caveats & non-goals
 

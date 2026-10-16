@@ -247,3 +247,37 @@ This could be relaxed later for 429s that carry Plane's own body
 
 **Cost.** A tool call can now block for up to ~1 minute per throttled request
 while it waits.
+
+## 2026-10-15: Release pipeline (GitHub Actions, tag → Docker Hub)
+
+**Decision.**
+- **One workflow** (`.github/workflows/ci.yml`). It runs the unit tests on
+  every PR and every push to `master`. (The brief said `main`; this repo's
+  default branch is `master`.)
+- **On a tag `v*.*.*`** it re-runs the tests, then:
+  1. refuses if the tag isn't exactly `v` + `pyproject.toml`'s version
+     (`scripts/check_release_version.py`, unit-tested);
+  2. builds a `linux/amd64` image;
+  3. smoke-tests it: the code inside must report that version, and both
+     labels must be set;
+  4. only then pushes.
+- **Image tags:** `jbresolin/plane_pages_mcp:vX.Y.Z` and `:latest`. They
+  **keep the `v`**, like every earlier tag (v0.1.0 … v0.2.3) and the one
+  production pins. Agreed with the operator; the brief's `:<version>` was
+  ambiguous.
+- **Labels:**
+  - `org.opencontainers.image.version` is the plain package version
+    (`0.3.0`, matching `__version__`);
+  - `org.opencontainers.image.revision` is the full commit SHA.
+
+  Both are set in the Dockerfile from build args, so a manual build can be
+  stamped the same way.
+- **`__version__`** is read from the installed package metadata. A test pins
+  it to `pyproject.toml`.
+
+**Reason.** `__init__.py` said 0.1.0 while v0.2.3 ran in production, and
+nothing tied a running image to a commit. The tag check, the smoke test and
+the metadata-based `__version__` make the tag, the label and the code agree
+by construction.
+
+**Not done.** Actions are pinned to major versions (`@v4`), not commit SHAs.
