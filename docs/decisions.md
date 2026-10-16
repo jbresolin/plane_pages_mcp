@@ -203,3 +203,47 @@ operator.
 **Checked.** On the dev stack, a private project is absent from a
 non-member's project list in the web app (direct GET returns 403) and appears
 once they are added.
+
+## 2026-10-15: Bounded retry on HTTP 429 (replaces "never retry a 429")
+
+**Previous decision (v0.1–v0.3, in `rest.py` and the README).** A 429 from
+Plane's REST API surfaced at once as a clear error. The server deliberately
+never retried, to avoid a silent retry loop.
+
+**Decision.** On 429, `rest.py` retries requests that are safe to repeat,
+within fixed bounds (`ratelimit.py`):
+
+- **Which requests** (by HTTP method, RFC 9110):
+  - retried: GET, HEAD, OPTIONS (safe) and PUT, DELETE (idempotent);
+  - **never retried**: POST (creates) and PATCH (partial updates).
+- **How long:** wait what `Retry-After` says (seconds or an HTTP date).
+  Without it, back off 1 s, 2 s, 4 s × a random factor in [0.5, 1.5).
+- **Bounds:** at most **3 retries** and at most **65 s** of total waiting per
+  request. If Plane asks for more than the remaining budget, stop at once
+  rather than wait and fail anyway.
+- **Logging:** each retry logs a warning with the method, path, attempt and
+  wait.
+- **When it stops:** it raises the same `RateLimitError`, with the original
+  message plus the reason it stopped.
+
+**Reason.** Batches of normal reads (e.g. listing a dozen projects, each tool
+call fanning out into several REST calls) hit the 60/minute limit and failed
+halfway, so the "never retry" rule cost more than it protected.
+
+**Why 65 s and not ~30 s (agreed with the operator).** Plane throttles with
+DRF's `SimpleRateThrottle`. After a burst, nothing frees up until the oldest
+request in the 60 s window expires. On the dev stack the limit hit at request
+61 after 3.6 s, with `Retry-After: 57`, and 429s don't count against the
+window. Any retry sooner just gets another 429, so a 30 s cap would have
+failed in exactly the case this change is for. With 65 s, a 70-read burst
+against the dev stack succeeded after one logged 57 s wait.
+
+**Why POST is still not retried.** DRF checks throttles before the view
+runs, so a POST that got 429 from Plane did nothing, and repeating it would
+be safe. We still don't retry it, because the brief says never to retry a
+create blindly, and a 429 could come from a proxy in front of Plane instead.
+This could be relaxed later for 429s that carry Plane's own body
+(`"error_code": 5900`).
+
+**Cost.** A tool call can now block for up to ~1 minute per throttled request
+while it waits.
